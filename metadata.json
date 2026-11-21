@@ -1,0 +1,6 @@
+{
+  "name": "果壳碰碰 · NutShell Bump",
+  "description": "天然果实手作娃娃与 AI 角色网页演示系统：固定链接即聊、明确记忆管理、照片生成专属娃娃形象、个人角色绑定与模拟出图。",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

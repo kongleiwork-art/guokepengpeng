@@ -1,0 +1,398 @@
+import type {
+  AccessoryOption,
+  CardDetail,
+  CardSummary,
+  CardVersion,
+  ChatMessage,
+  DemoStatusPayload,
+  DollDetail,
+  DollSummary,
+  FallbackTemplate,
+  MemoryItem,
+  OutputJob,
+  PersonaPublic,
+  SessionInfo,
+} from './types';
+
+export class ApiError extends Error {
+  code: string;
+  status: number;
+  requestId?: string;
+
+  constructor(status: number, code: string, message: string, requestId?: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+    this.requestId = requestId;
+  }
+}
+
+export function generateIdempotencyKey(prefix = 'idem'): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `${prefix}_${crypto.randomUUID()}`;
+  }
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(url, {
+    credentials: 'include',
+    ...init,
+  });
+
+  if (res.status === 204) {
+    return undefined as T;
+  }
+
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = body?.error;
+    throw new ApiError(
+      res.status,
+      err?.code || 'REQUEST_FAILED',
+      err?.message || `请求失败 (HTTP ${res.status})`,
+      err?.requestId
+    );
+  }
+  return body.data as T;
+}
+
+export const api = {
+  initSession(): Promise<SessionInfo> {
+    return requestJson<SessionInfo>('/api/session', { method: 'POST' });
+  },
+
+  listPersonas(): Promise<PersonaPublic[]> {
+    return requestJson<PersonaPublic[]>('/api/personas');
+  },
+
+  listAccessories(): Promise<AccessoryOption[]> {
+    return requestJson<AccessoryOption[]>('/api/accessories');
+  },
+
+  listTemplates(): Promise<FallbackTemplate[]> {
+    return requestJson<FallbackTemplate[]>('/api/templates');
+  },
+
+  listDolls(): Promise<DollSummary[]> {
+    return requestJson<DollSummary[]>('/api/dolls');
+  },
+
+  getDoll(dollId: string): Promise<DollDetail> {
+    return requestJson<DollDetail>(`/api/dolls/${encodeURIComponent(dollId)}`);
+  },
+
+  renameDoll(dollId: string, name: string): Promise<{ id: string; name: string }> {
+    return requestJson<{ id: string; name: string }>(`/api/dolls/${encodeURIComponent(dollId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+  },
+
+  getMessages(dollId: string, limit = 50): Promise<{ items: ChatMessage[]; nextCursor: string | null }> {
+    return requestJson(`/api/dolls/${encodeURIComponent(dollId)}/messages?limit=${limit}`);
+  },
+
+  getMemories(dollId: string): Promise<MemoryItem[]> {
+    return requestJson<MemoryItem[]>(`/api/dolls/${encodeURIComponent(dollId)}/memory`);
+  },
+
+  addMemory(dollId: string, type: string, value: string): Promise<MemoryItem & { memoryId: string }> {
+    return requestJson(`/api/dolls/${encodeURIComponent(dollId)}/memory`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, value }),
+    });
+  },
+
+  deleteMemory(dollId: string, memoryId: string): Promise<void> {
+    return requestJson(`/api/dolls/${encodeURIComponent(dollId)}/memory/${encodeURIComponent(memoryId)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  listCards(): Promise<CardSummary[]> {
+    return requestJson<CardSummary[]>('/api/cards');
+  },
+
+  getCard(cardId: string): Promise<CardDetail> {
+    return requestJson<CardDetail>(`/api/cards/${encodeURIComponent(cardId)}`);
+  },
+
+  getCardVersion(versionId: string): Promise<CardVersion> {
+    return requestJson<CardVersion>(`/api/card-versions/${encodeURIComponent(versionId)}`);
+  },
+
+  createCard(
+    formData: FormData,
+    idempotencyKey: string,
+    options?: { simulateFail?: boolean }
+  ): Promise<{
+    cardId: string;
+    versionId: string;
+    status: string;
+    provider: string;
+    cardUrl: string;
+    processingUrl: string;
+  }> {
+    const headers: Record<string, string> = {
+      'Idempotency-Key': idempotencyKey,
+    };
+    if (options?.simulateFail) {
+      headers['X-Mock-Fail'] = 'true';
+    }
+    return requestJson('/api/cards', {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+  },
+
+  redrawCard(
+    cardId: string,
+    idempotencyKey: string,
+    options?: { simulateFail?: boolean }
+  ): Promise<{ cardId: string; versionId: string; versionNumber: number; status: string; provider: string }> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idempotencyKey,
+    };
+    if (options?.simulateFail) {
+      headers['X-Mock-Fail'] = 'true';
+    }
+    return requestJson(`/api/cards/${encodeURIComponent(cardId)}/redraw`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ simulateFail: Boolean(options?.simulateFail) }),
+    });
+  },
+
+  cancelVersion(versionId: string, idempotencyKey: string): Promise<{ versionId: string; status: string }> {
+    return requestJson(`/api/card-versions/${encodeURIComponent(versionId)}/cancel`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+    });
+  },
+
+  applyFallback(cardId: string, templateId: string, idempotencyKey: string): Promise<CardVersion> {
+    return requestJson(`/api/cards/${encodeURIComponent(cardId)}/fallback`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+      },
+      body: JSON.stringify({ templateId }),
+    });
+  },
+
+  bindCard(
+    cardId: string,
+    versionId: string,
+    dollName: string,
+    idempotencyKey: string
+  ): Promise<{ dollId: string; dollUrl: string; cardUrl: string; cardVersionId: string }> {
+    return requestJson(`/api/cards/${encodeURIComponent(cardId)}/bind`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+      },
+      body: JSON.stringify({ versionId, dollName }),
+    });
+  },
+
+  createPlotJob(
+    cardVersionId: string,
+    paperSize: string,
+    idempotencyKey: string,
+    simulateFail = false
+  ): Promise<OutputJob> {
+    return requestJson('/api/plot/jobs', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+      },
+      body: JSON.stringify({ cardVersionId, paperSize, simulateFail }),
+    });
+  },
+
+  listPlotJobs(cardId?: string): Promise<OutputJob[]> {
+    const q = cardId ? `?cardId=${encodeURIComponent(cardId)}` : '';
+    return requestJson<OutputJob[]>(`/api/plot/jobs${q}`);
+  },
+
+  getPlotJob(jobId: string): Promise<OutputJob> {
+    return requestJson<OutputJob>(`/api/plot/jobs/${encodeURIComponent(jobId)}`);
+  },
+
+  getDemoStatus(adminToken: string): Promise<DemoStatusPayload> {
+    return requestJson<DemoStatusPayload>('/api/demo/status', {
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+      },
+    });
+  },
+
+  resetDemoSession(
+    adminToken: string,
+    sessionId: string
+  ): Promise<{ resetSessionId: string; invalidated: boolean; preservedDemoDolls: boolean }> {
+    return requestJson('/api/demo/reset', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ sessionId }),
+    });
+  },
+};
+
+export interface StreamChatCallbacks {
+  onMeta?: (meta: {
+    requestId: string;
+    clientMessageId: string;
+    assistantMessageId?: string;
+    provider: string;
+    replayed?: boolean;
+    savedMemoryId?: string | null;
+  }) => void;
+  onDelta: (text: string) => void;
+  onDone: (done: {
+    assistantMessageId: string;
+    status: string;
+    firstTokenMs?: number | null;
+    totalMs?: number | null;
+    savedMemoryId?: string | null;
+  }) => void;
+  onError: (err: { code: string; message: string; requestId?: string }) => void;
+}
+
+export async function streamDollChat(
+  dollId: string,
+  payload: { text: string; clientMessageId: string; rememberText?: string },
+  callbacks: StreamChatCallbacks,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch(`/api/dolls/${encodeURIComponent(dollId)}/chat`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const err = body?.error;
+    callbacks.onError({
+      code: err?.code || 'REQUEST_FAILED',
+      message: err?.message || `请求失败 (HTTP ${res.status})`,
+      requestId: err?.requestId,
+    });
+    return;
+  }
+
+  if (!res.body) {
+    callbacks.onError({ code: 'PROVIDER_ERROR', message: '浏览器未能读取响应流' });
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let currentEvent = 'message';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const blocks = buffer.split('\n\n');
+    buffer = blocks.pop() ?? '';
+
+    for (const block of blocks) {
+      const lines = block.split('\n');
+      let eventName = currentEvent;
+      let dataStr = '';
+
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          dataStr += line.slice(5).trim();
+        }
+      }
+
+      if (!dataStr) continue;
+      try {
+        const parsed = JSON.parse(dataStr);
+        if (eventName === 'meta') {
+          callbacks.onMeta?.(parsed);
+        } else if (eventName === 'delta') {
+          callbacks.onDelta(parsed.text || '');
+        } else if (eventName === 'done') {
+          callbacks.onDone(parsed);
+        } else if (eventName === 'error') {
+          callbacks.onError(parsed);
+        }
+      } catch {
+        // Ignore malformed SSE fragment
+      }
+      currentEvent = 'message';
+    }
+  }
+}
+
+/**
+ * Compress & EXIF-normalize a photo on the client canvas so it stays <= 2 MB and upright.
+ */
+export async function compressImageForUpload(file: Blob): Promise<File> {
+  // createImageBitmap applies EXIF orientation automatically in modern browsers
+  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(async () => {
+    return createImageBitmap(file);
+  });
+
+  const maxSide = 1280;
+  let width = bitmap.width;
+  let height = bitmap.height;
+  if (width > maxSide || height > maxSide) {
+    const ratio = Math.min(maxSide / width, maxSide / height);
+    width = Math.round(width * ratio);
+    height = Math.round(height * ratio);
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    bitmap.close();
+    throw new Error('浏览器画布初始化失败');
+  }
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+
+  const qualities = [0.86, 0.72, 0.58];
+  for (const q of qualities) {
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((b) => resolve(b), 'image/jpeg', q)
+    );
+    if (blob && blob.size <= 1.9 * 1024 * 1024) {
+      return new File([blob], 'photo.jpg', { type: 'image/jpeg' });
+    }
+  }
+
+  const fallbackBlob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.45)
+  );
+  if (!fallbackBlob) {
+    throw new Error('图片压缩失败，请尝试换一张照片');
+  }
+  return new File([fallbackBlob], 'photo.jpg', { type: 'image/jpeg' });
+}

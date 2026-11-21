@@ -1,0 +1,1526 @@
+@import "tailwindcss";
+
+@theme {
+  --font-serif-display: "Noto Serif SC", "Cormorant Garamond", -apple-system, BlinkMacSystemFont, "SF Pro Display", Georgia, serif;
+  --font-atelier-num: "Cormorant Garamond", "Noto Serif SC", Georgia, serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Quicksand", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-paper: #FAF7F2;
+  --color-surface: #FFFDF9;
+  --color-surface-subtle: #F4EFE7;
+  --color-border-hairline: #E6DDD0;
+  --color-ink: #382A22;
+  --color-ink-secondary: #6E5C50;
+  --color-ink-muted: #968477;
+  --color-mint: #4A8276;
+  --color-mint-hover: #3B6C61;
+  --color-mint-tint: #ECF5F2;
+  --color-bell: #C9963B;
+  --color-danger: #B84A39;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    scroll-behavior: smooth;
+    overflow-x: clip;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-tap-highlight-color: transparent;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  body {
+    overscroll-behavior-y: none;
+    overflow-x: clip;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  /* Native App feel: hide clunky webpage scrollbars everywhere while keeping smooth touch/wheel scroll */
+  * {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  *::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+
+  h1, h2, .font-editorial {
+    font-family: var(--font-serif-display);
+    text-wrap: balance;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  button:not(:disabled),
+  a[href] {
+    cursor: pointer;
+  }
+}
+
+.font-atelier-num {
+  font-family: var(--font-atelier-num);
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+/* Sunlit Kyoto Atelier Stationery Canvas — warm dappled morning light + ultra-fine cotton dots */
+.journal-paper {
+  background-color: #FAF6F0;
+  background-image:
+    radial-gradient(ellipse 75% 48% at 10% 0%, rgba(235, 206, 166, 0.24) 0%, rgba(235, 206, 166, 0.06) 44%, transparent 72%),
+    radial-gradient(ellipse 68% 52% at 94% 12%, rgba(124, 178, 165, 0.14) 0%, rgba(124, 178, 165, 0.03) 45%, transparent 72%),
+    radial-gradient(ellipse 60% 44% at 80% 96%, rgba(218, 182, 138, 0.15) 0%, transparent 66%),
+    radial-gradient(rgba(128, 106, 88, 0.085) 0.9px, transparent 0.9px);
+  background-size: 100% 100%, 100% 100%, 100% 100%, 24px 24px;
+  background-attachment: fixed, fixed, fixed, scroll;
+}
+
+/* Apple iOS frosted translucent navigation & tab bars with specular top edge */
+.ios-glass-bar {
+  background-color: rgba(251, 248, 243, 0.84);
+  -webkit-backdrop-filter: saturate(190%) blur(22px);
+  backdrop-filter: saturate(190%) blur(22px);
+  box-shadow:
+    inset 0 -0.5px 0 rgba(56, 42, 34, 0.06),
+    0 1px 12px -4px rgba(56, 42, 34, 0.06);
+}
+
+.ios-tab-bar {
+  background-color: rgba(255, 253, 249, 0.88);
+  -webkit-backdrop-filter: saturate(200%) blur(26px);
+  backdrop-filter: saturate(200%) blur(26px);
+  box-shadow:
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.95),
+    0 -0.5px 0 rgba(56, 42, 34, 0.09),
+    0 -8px 24px -10px rgba(56, 42, 34, 0.08);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (min-width: 768px) {
+  .ios-tab-bar {
+    background-color: rgba(255, 253, 249, 0.84);
+    border: 1px solid rgba(56, 42, 34, 0.09);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.96),
+      inset 0 -1px 0 rgba(56, 42, 34, 0.03),
+      0 14px 36px -10px rgba(56, 42, 34, 0.16),
+      0 3px 10px -2px rgba(56, 42, 34, 0.06);
+    padding-bottom: 0;
+  }
+}
+
+/* Native Apple iOS Segmented Control track */
+.ios-segmented {
+  background-color: rgba(232, 223, 210, 0.68);
+  border: 1px solid rgba(56, 42, 34, 0.055);
+  border-radius: 14px;
+  padding: 3px;
+  box-shadow: inset 0 1px 2px rgba(56, 42, 34, 0.04);
+}
+
+.ios-segmented-thumb {
+  background: linear-gradient(180deg, #FFFFFF 0%, #FDFBF7 100%);
+  border-radius: 11px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 1px 2px rgba(56, 42, 34, 0.08),
+    0 3px 8px -2px rgba(56, 42, 34, 0.07);
+}
+
+.safe-pb {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
+}
+
+/* Flagship Kyoto Atelier Paper Card — layered warm depth + specular top edge */
+.studio-card {
+  background: linear-gradient(180deg, #FFFDFB 0%, #FFFDF9 100%);
+  border: 1px solid rgba(114, 92, 74, 0.13);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    0 1px 2px rgba(56, 42, 34, 0.035),
+    0 10px 28px -12px rgba(68, 50, 36, 0.11);
+}
+
+.studio-card-hover {
+  transition:
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 220ms ease,
+    background-color 220ms ease;
+  will-change: transform;
+}
+
+.studio-card-hover:hover {
+  transform: translateY(-2px);
+  border-color: rgba(74, 130, 118, 0.3);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.98),
+    0 4px 10px rgba(56, 42, 34, 0.05),
+    0 20px 40px -14px rgba(58, 86, 78, 0.16);
+}
+
+/* Understated sunlit parchment inset panel */
+.studio-inset {
+  background-color: rgba(248, 243, 235, 0.82);
+  border: 1px solid rgba(226, 216, 202, 0.85);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+/* =========================================================
+   Botanical Miniature Specimen Stages & Grounded Shadows
+   Soft watercolor light halos behind handmade dolls
+   ========================================================= */
+
+.specimen-stage-0 {
+  background:
+    radial-gradient(circle at 50% 44%, rgba(255, 255, 255, 0.92) 0%, rgba(232, 244, 240, 0.64) 56%, rgba(246, 240, 231, 0.42) 100%);
+}
+
+.specimen-stage-1 {
+  background:
+    radial-gradient(circle at 50% 44%, rgba(255, 255, 255, 0.92) 0%, rgba(246, 236, 224, 0.72) 56%, rgba(247, 241, 234, 0.42) 100%);
+}
+
+.specimen-stage-2 {
+  background:
+    radial-gradient(circle at 50% 44%, rgba(255, 255, 255, 0.92) 0%, rgba(238, 235, 245, 0.65) 56%, rgba(247, 242, 236, 0.42) 100%);
+}
+
+.specimen-stage-3 {
+  background:
+    radial-gradient(circle at 50% 44%, rgba(255, 255, 255, 0.92) 0%, rgba(248, 236, 229, 0.68) 56%, rgba(246, 240, 232, 0.42) 100%);
+}
+
+/* Grounded physical shadow beneath handmade doll figurines */
+.doll-pedestal-shadow {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 54%;
+  height: 14px;
+  border-radius: 9999px;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(68, 52, 40, 0.16) 0%,
+    rgba(68, 52, 40, 0.06) 52%,
+    transparent 76%
+  );
+  pointer-events: none;
+  transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 320ms ease;
+}
+
+.group:hover .doll-pedestal-shadow {
+  transform: translateX(-50%) scaleX(0.92);
+  opacity: 0.72;
+}
+
+/* Delicate museum gallery mat corner registration marks */
+.photo-mat-frame {
+  position: relative;
+}
+
+.photo-mat-frame::before,
+.photo-mat-frame::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0.45;
+  transition: opacity 220ms ease;
+}
+
+.photo-mat-frame::before {
+  top: 10px;
+  left: 10px;
+  border-top: 1px solid #968477;
+  border-left: 1px solid #968477;
+}
+
+.photo-mat-frame::after {
+  bottom: 10px;
+  right: 10px;
+  border-bottom: 1px solid #968477;
+  border-right: 1px solid #968477;
+}
+
+.group:hover .photo-mat-frame::before,
+.group:hover .photo-mat-frame::after {
+  opacity: 0.85;
+}
+
+/* Editorial Pull Quote — top & bottom hairline rules, NO thick left border */
+.atelier-pullquote {
+  position: relative;
+  border-top: 1px solid rgba(154, 136, 123, 0.28);
+  border-bottom: 1px solid rgba(154, 136, 123, 0.28);
+  background: linear-gradient(
+    90deg,
+    rgba(250, 246, 240, 0.2) 0%,
+    rgba(246, 240, 232, 0.65) 50%,
+    rgba(250, 246, 240, 0.2) 100%
+  );
+}
+
+/* Atelier Collector Passport surface for NFC / QR credentials */
+.atelier-passport {
+  background-color: #FFFDF9;
+  background-image:
+    radial-gradient(circle at 96% 8%, rgba(201, 150, 59, 0.13) 0%, transparent 46%),
+    radial-gradient(circle at 4% 94%, rgba(74, 130, 118, 0.11) 0%, transparent 48%),
+    radial-gradient(rgba(128, 106, 88, 0.06) 0.9px, transparent 0.9px);
+  background-size: 100% 100%, 100% 100%, 16px 16px;
+}
+
+/* Tactile stationery chat bubbles */
+.chat-bubble-doll {
+  background: linear-gradient(180deg, #FCF8F2 0%, #F5EFE5 100%);
+  border: 1px solid rgba(214, 202, 186, 0.85);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    0 2px 8px -4px rgba(56, 42, 34, 0.1);
+}
+
+.chat-bubble-user {
+  background: linear-gradient(180deg, #EAF4F1 0%, #DFEFEA 100%);
+  border: 1px solid rgba(170, 205, 195, 0.85);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 2px 8px -4px rgba(58, 108, 97, 0.14);
+}
+
+/* =========================================================
+   Apple + Japanese Stationery Differentiated Button System
+   (Distinct shapes, materials & visual weight — NO uniform boxes)
+   ========================================================= */
+
+/* 1. Flagship Primary Action — Organic Capsule with subtle botanical sheen */
+.btn-capsule-primary,
+.btn-primary-studio {
+  background: linear-gradient(180deg, #538E81 0%, #447B6F 100%);
+  color: #FFFFFF;
+  border: 1px solid #3D7065;
+  border-radius: 9999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 2px 6px rgba(58, 108, 97, 0.18),
+    0 6px 16px -6px rgba(58, 108, 97, 0.28);
+  transition:
+    filter 200ms ease,
+    border-color 200ms ease,
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.btn-capsule-primary:hover:not(:disabled),
+.btn-primary-studio:hover:not(:disabled) {
+  filter: brightness(0.96);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    0 6px 18px -4px rgba(58, 108, 97, 0.34);
+}
+
+.btn-capsule-primary:active:not(:disabled),
+.btn-primary-studio:active:not(:disabled) {
+  transform: scale(0.968);
+  filter: brightness(0.92);
+}
+
+.btn-capsule-primary:disabled,
+.btn-primary-studio:disabled {
+  background: #D1C8BC;
+  border-color: #C7BDB0;
+  color: #FAF7F2;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+/* 2. Botanical Watercolor Stamp Action — Diary Check-in */
+.btn-stamp-water {
+  background: linear-gradient(135deg, #ECF6F2 0%, #DCEEE7 100%);
+  color: #2B5C51;
+  border: 1px dashed #8BB7A9;
+  border-radius: 9999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 2px 8px -2px rgba(74, 130, 118, 0.18);
+  transition:
+    background-color 200ms ease,
+    border-color 200ms ease,
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.btn-stamp-water:hover:not(:disabled) {
+  border-color: #4A8276;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 4px 12px -2px rgba(74, 130, 118, 0.25);
+}
+
+.btn-stamp-water:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* 3. Apple iOS Tinted Pill — Quick Contextual Action (Light, borderless wash) */
+.btn-ink-tinted {
+  background-color: rgba(74, 130, 118, 0.11);
+  color: #2E6156;
+  border: 1px solid rgba(74, 130, 118, 0.14);
+  border-radius: 9999px;
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.btn-ink-tinted:hover:not(:disabled) {
+  background-color: rgba(74, 130, 118, 0.18);
+  border-color: rgba(74, 130, 118, 0.24);
+  color: #244F45;
+}
+
+.btn-ink-tinted:active:not(:disabled) {
+  transform: scale(0.96);
+  background-color: rgba(74, 130, 118, 0.22);
+}
+
+.btn-ink-tinted:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+/* 4. Warm Cotton-Paper Soft Secondary Pill — Subordinate Companion Action */
+.btn-paper-soft,
+.btn-secondary-studio {
+  background-color: rgba(255, 253, 249, 0.88);
+  color: #4D3D34;
+  border: 1px solid #DFD5C6;
+  border-radius: 9999px;
+  box-shadow: 0 1px 2px rgba(56, 42, 34, 0.04);
+  transition:
+    border-color 200ms ease,
+    color 200ms ease,
+    background-color 200ms ease,
+    box-shadow 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.btn-paper-soft:hover:not(:disabled),
+.btn-secondary-studio:hover:not(:disabled) {
+  border-color: #9BBDB3;
+  color: #2F6055;
+  background-color: #F4FAF8;
+}
+
+.btn-paper-soft:active:not(:disabled),
+.btn-secondary-studio:active:not(:disabled) {
+  transform: scale(0.968);
+}
+
+.btn-paper-soft:disabled,
+.btn-secondary-studio:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 5. Circular Tactile Orb Buttons — Pure Icon Triggers */
+.btn-orb-primary {
+  background: linear-gradient(180deg, #538E81 0%, #447B6F 100%);
+  color: #FFFFFF;
+  border-radius: 9999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    0 3px 10px -2px rgba(68, 123, 111, 0.36);
+  transition:
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 180ms ease,
+    box-shadow 220ms ease;
+  will-change: transform;
+}
+
+.btn-orb-primary:hover:not(:disabled) {
+  filter: brightness(0.96);
+  box-shadow: 0 5px 14px -2px rgba(68, 123, 111, 0.42);
+}
+
+.btn-orb-primary:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.btn-orb-primary:disabled {
+  background: #D1C8BC;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.btn-orb-glass {
+  background-color: rgba(255, 253, 250, 0.9);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  color: #5C4B40;
+  border: 1px solid rgba(56, 42, 34, 0.1);
+  border-radius: 9999px;
+  box-shadow: 0 2px 8px rgba(56, 42, 34, 0.08);
+  transition:
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 180ms ease,
+    border-color 180ms ease;
+}
+
+.btn-orb-glass:hover:not(:disabled) {
+  color: #382A22;
+  border-color: rgba(74, 130, 118, 0.35);
+}
+
+.btn-orb-glass:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+/* 6. Pure Transparent Apple-Style Editorial Text & Icon Actions (ZERO box) */
+.btn-icon-ghost {
+  background-color: transparent;
+  color: #6E5C50;
+  transition:
+    color 180ms ease,
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.btn-icon-ghost:hover:not(:disabled) {
+  color: #3B6C61;
+}
+
+.btn-icon-ghost:active:not(:disabled) {
+  opacity: 0.6;
+  transform: scale(0.96);
+}
+
+.btn-icon-ghost:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.btn-icon-danger {
+  background-color: transparent;
+  color: #B84A39;
+  transition:
+    color 180ms ease,
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.btn-icon-danger:hover:not(:disabled) {
+  color: #8E3022;
+}
+
+.btn-icon-danger:active:not(:disabled) {
+  opacity: 0.6;
+}
+
+.btn-icon-danger:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+/* =========================================================
+   Apple iOS Mobile Long-Press Micro-Motion (Scale-Up + Hue Shift)
+   ========================================================= */
+
+@media (hover: none), (pointer: coarse), (max-width: 767px) {
+  .studio-card-hover,
+  [data-pressable],
+  .btn-capsule-primary,
+  .btn-primary-studio,
+  .btn-stamp-water,
+  .btn-ink-tinted,
+  .btn-paper-soft,
+  .btn-secondary-studio,
+  .btn-orb-primary,
+  .btn-orb-glass,
+  .btn-icon-ghost,
+  .btn-icon-danger {
+    -webkit-touch-callout: none;
+    user-select: none;
+  }
+}
+
+/* Stage 1: Crisp initial finger touch contact */
+.studio-card-hover[data-pressing="true"],
+[data-pressable="card"][data-pressing="true"] {
+  transform: scale(0.985);
+}
+
+/* Stage 2: Apple-style long-press gentle enlargement + airy sage-mint hue shift */
+.studio-card-hover[data-long-pressing="true"] {
+  transform: scale(1.028) translateY(-2px);
+  background-color: #F7FBF9;
+  border-color: rgba(74, 130, 118, 0.42);
+  box-shadow:
+    0 14px 32px rgba(74, 130, 118, 0.15),
+    0 2px 8px rgba(56, 42, 34, 0.06);
+  position: relative;
+  z-index: 10;
+}
+
+.studio-card-hover[data-long-pressing="true"] .doll-hover-sway {
+  transform: scale(1.04) translateY(-2px);
+  transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Selectable option cards (MBTI, accessories, version tiles) */
+[data-pressable="card"] {
+  transition:
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 200ms ease,
+    border-color 200ms ease,
+    box-shadow 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+[data-pressable="card"][data-long-pressing="true"] {
+  transform: scale(1.03);
+  background-color: #EAF5F1;
+  border-color: rgba(74, 130, 118, 0.55);
+  box-shadow:
+    0 10px 24px rgba(74, 130, 118, 0.14),
+    0 2px 6px rgba(56, 42, 34, 0.04);
+  position: relative;
+  z-index: 10;
+}
+
+/* Primary capsule / orb long-press: outward swell + bright luminous sage shift */
+.btn-capsule-primary[data-long-pressing="true"]:not(:disabled),
+.btn-primary-studio[data-long-pressing="true"]:not(:disabled),
+.btn-orb-primary[data-long-pressing="true"]:not(:disabled) {
+  transform: scale(1.04);
+  background: linear-gradient(180deg, #5C9D8F 0%, #4A887A 100%);
+  border-color: #467D71;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    0 10px 24px rgba(74, 130, 118, 0.34);
+}
+
+/* Watercolor stamp & tinted pill long-press */
+.btn-stamp-water[data-long-pressing="true"]:not(:disabled),
+.btn-ink-tinted[data-long-pressing="true"]:not(:disabled) {
+  transform: scale(1.04);
+  background-color: rgba(74, 130, 118, 0.22);
+  border-color: #4A8276;
+  color: #214C42;
+  box-shadow: 0 8px 18px rgba(74, 130, 118, 0.16);
+}
+
+/* Secondary paper pill & glass orb long-press */
+.btn-paper-soft[data-long-pressing="true"]:not(:disabled),
+.btn-secondary-studio[data-long-pressing="true"]:not(:disabled),
+.btn-orb-glass[data-long-pressing="true"]:not(:disabled) {
+  transform: scale(1.04);
+  background-color: #E8F4F0;
+  border-color: #4A8276;
+  color: #2B594F;
+  box-shadow: 0 8px 18px rgba(74, 130, 118, 0.14);
+}
+
+/* Pure transparent icon/text button long-press: gentle scale + ink color shift (NO fill box) */
+.btn-icon-ghost[data-long-pressing="true"]:not(:disabled) {
+  transform: scale(1.06);
+  opacity: 1;
+  color: #366B5F;
+}
+
+.btn-icon-danger[data-long-pressing="true"]:not(:disabled) {
+  transform: scale(1.06);
+  opacity: 1;
+  color: #8E2E20;
+}
+
+/* Mobile bottom Tab Bar item long-press: gentle Apple Spring swell + mint tint */
+[data-pressable="tab"] {
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), color 180ms ease;
+}
+
+[data-pressable="tab"][data-long-pressing="true"] {
+  transform: scale(1.1);
+}
+
+[data-pressable="tab"][data-long-pressing="true"] span {
+  color: #3B6C61;
+}
+
+/* Gentle luxury figurine micro-breath on hover */
+@keyframes doll-hover-lift {
+  0% { transform: translateY(0px) scale(1); }
+  55% { transform: translateY(-4px) scale(1.028); }
+  100% { transform: translateY(-3px) scale(1.022); }
+}
+
+.group:hover .doll-hover-sway {
+  animation: doll-hover-lift 0.52s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes watercolor-flow {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(260%); }
+}
+
+.watercolor-bar {
+  animation: watercolor-flow 1.8s ease-in-out infinite;
+}
+
+/* =========================================================
+   Japanese Stationery Watercolor Diffusion & Bloom Loaders
+   ========================================================= */
+
+@keyframes wc-bloom-a {
+  0%, 100% {
+    transform: translate(-12%, -8%) scale(0.86);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translate(10%, 8%) scale(1.18);
+    opacity: 0.85;
+  }
+}
+
+@keyframes wc-bloom-b {
+  0%, 100% {
+    transform: translate(12%, 10%) scale(1.12);
+    opacity: 0.4;
+  }
+  50% {
+    transform: translate(-10%, -10%) scale(0.84);
+    opacity: 0.78;
+  }
+}
+
+@keyframes wc-ripple-expand {
+  0% {
+    transform: scale(0.42);
+    opacity: 0.72;
+  }
+  65% {
+    opacity: 0.26;
+  }
+  100% {
+    transform: scale(1.65);
+    opacity: 0;
+  }
+}
+
+@keyframes wc-ink-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
+
+.wc-wash {
+  position: relative;
+  overflow: hidden;
+  background-color: #F6F0E6;
+}
+
+.wc-wash::before,
+.wc-wash::after {
+  content: "";
+  position: absolute;
+  inset: -32%;
+  border-radius: 9999px;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+/* Sage-mint watercolor bloom */
+.wc-wash::before {
+  background: radial-gradient(
+    circle at 38% 40%,
+    rgba(74, 130, 118, 0.22) 0%,
+    rgba(130, 178, 166, 0.1) 42%,
+    transparent 70%
+  );
+  animation: wc-bloom-a 3.4s ease-in-out infinite;
+}
+
+/* Milky-apricot warm pigment bloom */
+.wc-wash::after {
+  background: radial-gradient(
+    circle at 66% 62%,
+    rgba(216, 178, 136, 0.28) 0%,
+    rgba(232, 206, 178, 0.12) 45%,
+    transparent 72%
+  );
+  animation: wc-bloom-b 4.1s ease-in-out infinite;
+}
+
+.wc-line {
+  position: relative;
+  overflow: hidden;
+  background-color: #EFE7DB;
+  border-radius: 9999px;
+}
+
+.wc-line::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 60%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 253, 250, 0.72) 42%,
+    rgba(176, 212, 203, 0.32) 60%,
+    transparent 100%
+  );
+  animation: wc-ink-sweep 2.1s cubic-bezier(0.35, 0, 0.25, 1) infinite;
+}
+
+.wc-ripple-ring {
+  animation: wc-ripple-expand 2.6s cubic-bezier(0.18, 0.7, 0.3, 1) infinite;
+  will-change: transform, opacity;
+}
+
+.wc-ripple-ring-delay-1 {
+  animation-delay: 0.85s;
+}
+
+.wc-ripple-ring-delay-2 {
+  animation-delay: 1.7s;
+}
+
+/* Soft Japanese stationery watercolor paper background for 果壳日记 */
+.wc-diary-surface {
+  background-color: #FFFDF9;
+  background-image:
+    radial-gradient(circle at 8% 15%, rgba(74, 130, 118, 0.13) 0%, rgba(74, 130, 118, 0.04) 32%, transparent 58%),
+    radial-gradient(circle at 92% 88%, rgba(214, 174, 130, 0.18) 0%, rgba(214, 174, 130, 0.06) 34%, transparent 60%),
+    radial-gradient(circle at 76% 14%, rgba(154, 198, 186, 0.12) 0%, transparent 44%),
+    radial-gradient(rgba(128, 106, 88, 0.07) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 100% 100%, 20px 20px;
+}
+
+/* Japanese stationery album card: warm cotton-paper grain + layered paper shadow */
+.journal-album-card {
+  background-color: #FFFDF9;
+  background-image:
+    radial-gradient(circle at 94% 6%, rgba(74, 130, 118, 0.08) 0%, transparent 45%),
+    radial-gradient(circle at 6% 96%, rgba(214, 176, 134, 0.12) 0%, transparent 50%),
+    radial-gradient(rgba(128, 106, 88, 0.065) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 16px 16px;
+  border: 1px solid #EAE1D4;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    0 1px 2px rgba(74, 54, 40, 0.05),
+    0 9px 22px -8px rgba(92, 68, 53, 0.13);
+}
+
+.journal-album-card:hover {
+  border-color: rgba(74, 130, 118, 0.34);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 3px 8px rgba(74, 54, 40, 0.06),
+    0 16px 32px -10px rgba(74, 130, 118, 0.18);
+}
+
+/* Gentle doll voice soundwave button & whispering breeze sweep */
+.btn-voice-idle {
+  background-color: rgba(255, 253, 249, 0.72);
+  border: 1px solid rgba(220, 210, 196, 0.85);
+}
+
+.btn-voice-idle:hover:not(:disabled) {
+  background-color: rgba(236, 245, 242, 0.75);
+  border-color: rgba(74, 130, 118, 0.38);
+}
+
+.btn-voice-playing {
+  background: linear-gradient(135deg, rgba(234, 245, 241, 0.95) 0%, rgba(248, 242, 229, 0.92) 100%);
+  border: 1px solid rgba(74, 130, 118, 0.42);
+  box-shadow: 0 2px 10px -2px rgba(74, 130, 118, 0.22);
+}
+
+@keyframes breeze-ribbon-drift {
+  0% {
+    transform: translateX(-110%) skewX(-12deg);
+    opacity: 0;
+  }
+  28% {
+    opacity: 0.75;
+  }
+  72% {
+    opacity: 0.55;
+  }
+  100% {
+    transform: translateX(130%) skewX(-12deg);
+    opacity: 0;
+  }
+}
+
+.breeze-ribbon-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 68%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(122, 182, 167, 0.14) 36%,
+    rgba(218, 186, 124, 0.12) 64%,
+    transparent 100%
+  );
+  animation: breeze-ribbon-drift 3.2s cubic-bezier(0.32, 0.08, 0.24, 1) infinite;
+}
+
+/* =========================================================
+   Chat Japanese Stationery Paper Textures (Lightweight Transparent Overlays)
+   1. 和纸 (Washi): handmade mulberry fiber wisps + subtle warm botanical flecks
+   2. 亚麻 (Linen): crisp warp-and-weft natural flax woven crosshatch
+   3. 棉布 (Cotton): soft diagonal cotton-cloth twill + delicate pulp grain
+   ========================================================= */
+
+.chat-texture-washi {
+  background-color: rgba(255, 249, 238, 0.34);
+  background-image:
+    radial-gradient(circle at 14% 12%, rgba(214, 178, 134, 0.14) 0%, transparent 48%),
+    radial-gradient(circle at 86% 84%, rgba(74, 130, 118, 0.08) 0%, transparent 52%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140' viewBox='0 0 140 140'%3E%3Cg fill='none' stroke='%238A745E' stroke-linecap='round'%3E%3Cpath d='M12 24 C22 20, 31 28, 43 23' stroke-width='0.75' stroke-opacity='0.14'/%3E%3Cpath d='M78 16 C88 22, 99 18, 112 25' stroke-width='0.65' stroke-opacity='0.12'/%3E%3Cpath d='M28 72 C36 66, 48 68, 56 61' stroke-width='0.7' stroke-opacity='0.13'/%3E%3Cpath d='M92 78 C102 74, 116 82, 128 75' stroke-width='0.75' stroke-opacity='0.14'/%3E%3Cpath d='M16 116 C28 111, 39 119, 51 114' stroke-width='0.65' stroke-opacity='0.12'/%3E%3Cpath d='M68 118 C79 112, 90 124, 102 117' stroke-width='0.7' stroke-opacity='0.11'/%3E%3Cpath d='M58 38 C63 45, 59 53, 64 59' stroke-width='0.6' stroke-opacity='0.11'/%3E%3Cpath d='M124 44 C119 52, 125 60, 119 67' stroke-width='0.6' stroke-opacity='0.1'/%3E%3C/g%3E%3Cg fill='%239A8066'%3E%3Ccircle cx='34' cy='44' r='0.9' fill-opacity='0.16'/%3E%3Ccircle cx='104' cy='52' r='0.75' fill-opacity='0.14'/%3E%3Ccircle cx='66' cy='92' r='0.85' fill-opacity='0.15'/%3E%3Ccircle cx='22' cy='94' r='0.7' fill-opacity='0.13'/%3E%3Ccircle cx='118' cy='108' r='0.8' fill-opacity='0.15'/%3E%3Ccircle cx='82' cy='38' r='0.65' fill-opacity='0.12'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 100% 100%, 100% 100%, 140px 140px;
+}
+
+.chat-texture-linen {
+  background-color: rgba(235, 224, 205, 0.3);
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      rgba(116, 94, 72, 0.065) 0px,
+      rgba(116, 94, 72, 0.065) 1px,
+      transparent 1px,
+      transparent 6px,
+      rgba(138, 116, 92, 0.035) 6px,
+      rgba(138, 116, 92, 0.035) 7px,
+      transparent 7px,
+      transparent 12px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      rgba(116, 94, 72, 0.06) 0px,
+      rgba(116, 94, 72, 0.06) 1px,
+      transparent 1px,
+      transparent 5px,
+      rgba(255, 252, 245, 0.24) 5px,
+      rgba(255, 252, 245, 0.24) 6px,
+      transparent 6px,
+      transparent 11px
+    ),
+    radial-gradient(circle at 82% 18%, rgba(188, 160, 122, 0.12) 0%, transparent 55%);
+}
+
+.chat-texture-cotton {
+  background-color: rgba(247, 244, 238, 0.42);
+  background-image:
+    repeating-linear-gradient(
+      45deg,
+      rgba(110, 96, 84, 0.045) 0px,
+      rgba(110, 96, 84, 0.045) 1px,
+      transparent 1px,
+      transparent 7px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      rgba(74, 130, 118, 0.038) 0px,
+      rgba(74, 130, 118, 0.038) 1px,
+      transparent 1px,
+      transparent 7px
+    ),
+    radial-gradient(rgba(128, 110, 94, 0.095) 0.85px, transparent 0.85px),
+    radial-gradient(circle at 20% 82%, rgba(164, 200, 190, 0.1) 0%, transparent 52%);
+  background-size: auto, auto, 14px 14px, 100% 100%;
+}
+
+/* Watercolor-textured specimen cards for 娃娃收藏柜 */
+.wc-cabinet-card {
+  background-color: #FFFDF9;
+  border: 1px solid rgba(176, 158, 136, 0.34);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    0 2px 6px rgba(68, 52, 40, 0.04),
+    0 10px 24px -12px rgba(74, 56, 42, 0.14);
+}
+
+.wc-cabinet-wash-0 {
+  background-image:
+    radial-gradient(circle at 92% 10%, rgba(74, 130, 118, 0.15) 0%, rgba(74, 130, 118, 0.04) 34%, transparent 62%),
+    radial-gradient(circle at 6% 94%, rgba(218, 180, 132, 0.17) 0%, transparent 56%),
+    radial-gradient(rgba(128, 106, 88, 0.065) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 16px 16px;
+}
+
+.wc-cabinet-wash-1 {
+  background-image:
+    radial-gradient(circle at 12% 14%, rgba(224, 178, 136, 0.18) 0%, rgba(224, 178, 136, 0.05) 36%, transparent 64%),
+    radial-gradient(circle at 90% 88%, rgba(132, 182, 168, 0.15) 0%, transparent 58%),
+    radial-gradient(rgba(128, 106, 88, 0.065) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 16px 16px;
+}
+
+.wc-cabinet-wash-2 {
+  background-image:
+    radial-gradient(circle at 86% 16%, rgba(201, 150, 59, 0.14) 0%, rgba(201, 150, 59, 0.04) 36%, transparent 62%),
+    radial-gradient(circle at 14% 88%, rgba(114, 168, 156, 0.15) 0%, transparent 58%),
+    radial-gradient(rgba(128, 106, 88, 0.065) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 16px 16px;
+}
+
+/* =========================================================
+   Home Central Brand Visual — 「果壳日记」Heirloom Cotton Letter
+   Soft beige cotton-cloth weave + dynamic watercolor blooms + hairline serif
+   ========================================================= */
+
+.font-serif-hairline {
+  font-family: "Noto Serif SC", "Cormorant Garamond", Georgia, serif;
+  font-weight: 200;
+  font-synthesis-weight: none;
+}
+
+.letter-cotton-surface {
+  background-color: #F4EDE1;
+  background-image:
+    /* Subtle antique letter-paper warm edge patina */
+    radial-gradient(ellipse 88% 78% at 50% 48%, rgba(255, 252, 245, 0.72) 0%, rgba(244, 236, 222, 0.45) 62%, rgba(226, 212, 190, 0.34) 100%),
+    /* Soft cotton-cloth diagonal twill weave */
+    repeating-linear-gradient(
+      45deg,
+      rgba(128, 108, 86, 0.045) 0px,
+      rgba(128, 108, 86, 0.045) 1px,
+      transparent 1px,
+      transparent 6px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      rgba(148, 126, 100, 0.036) 0px,
+      rgba(148, 126, 100, 0.036) 1px,
+      transparent 1px,
+      transparent 6px
+    ),
+    /* Delicate woven warp & weft cotton threads */
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 252, 246, 0.32) 0px,
+      rgba(255, 252, 246, 0.32) 1px,
+      transparent 1px,
+      transparent 9px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      rgba(138, 118, 96, 0.032) 0px,
+      rgba(138, 118, 96, 0.032) 1px,
+      transparent 1px,
+      transparent 9px
+    ),
+    /* Organic cotton-rag fibers & subtle botanical flecks */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'%3E%3Cg fill='none' stroke='%238F775C' stroke-linecap='round'%3E%3Cpath d='M16 26 C26 23, 34 29, 44 25' stroke-width='0.65' stroke-opacity='0.14'/%3E%3Cpath d='M92 18 C104 23, 114 19, 126 24' stroke-width='0.6' stroke-opacity='0.12'/%3E%3Cpath d='M32 88 C42 82, 52 86, 60 80' stroke-width='0.6' stroke-opacity='0.11'/%3E%3Cpath d='M108 106 C118 102, 130 109, 142 103' stroke-width='0.65' stroke-opacity='0.13'/%3E%3Cpath d='M22 138 C34 134, 46 140, 58 135' stroke-width='0.55' stroke-opacity='0.11'/%3E%3C/g%3E%3Cg fill='%23998064'%3E%3Ccircle cx='44' cy='52' r='0.8' fill-opacity='0.16'/%3E%3Ccircle cx='124' cy='58' r='0.7' fill-opacity='0.14'/%3E%3Ccircle cx='78' cy='116' r='0.75' fill-opacity='0.15'/%3E%3Ccircle cx='138' cy='134' r='0.65' fill-opacity='0.13'/%3E%3Ccircle cx='28' cy='108' r='0.6' fill-opacity='0.12'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 100% 100%, auto, auto, auto, auto, 160px 160px;
+  border: 1px solid rgba(178, 158, 132, 0.42);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 253, 248, 0.92),
+    inset 0 0 36px rgba(196, 174, 142, 0.16),
+    0 2px 6px rgba(68, 52, 38, 0.045),
+    0 16px 38px -18px rgba(74, 56, 40, 0.16);
+}
+
+/* Faint heirloom stationery ruled guide lines */
+.letter-stationery-rules {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 31px,
+    rgba(136, 114, 90, 0.075) 31px,
+    rgba(136, 114, 90, 0.075) 32px
+  );
+}
+
+/* Slow, organic watercolor pigment diffusion behind the hairline serif title */
+@keyframes letter-wc-bloom-sage {
+  0%, 100% {
+    transform: translate3d(-8%, -4%, 0) scale(0.94) rotate(0deg);
+    opacity: 0.56;
+  }
+  50% {
+    transform: translate3d(7%, 6%, 0) scale(1.12) rotate(5deg);
+    opacity: 0.82;
+  }
+}
+
+@keyframes letter-wc-bloom-ochre {
+  0%, 100% {
+    transform: translate3d(8%, 5%, 0) scale(1.06) rotate(0deg);
+    opacity: 0.52;
+  }
+  50% {
+    transform: translate3d(-6%, -5%, 0) scale(0.92) rotate(-6deg);
+    opacity: 0.78;
+  }
+}
+
+@keyframes letter-wc-bloom-blush {
+  0%, 100% {
+    transform: translate3d(0%, 4%, 0) scale(0.92);
+    opacity: 0.36;
+  }
+  50% {
+    transform: translate3d(4%, -6%, 0) scale(1.14);
+    opacity: 0.64;
+  }
+}
+
+.letter-wc-sage {
+  background: radial-gradient(
+    ellipse 62% 58% at 46% 48%,
+    rgba(74, 130, 118, 0.24) 0%,
+    rgba(116, 174, 160, 0.13) 42%,
+    rgba(154, 200, 188, 0.04) 68%,
+    transparent 82%
+  );
+  filter: blur(18px);
+  animation: letter-wc-bloom-sage 9.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.letter-wc-ochre {
+  background: radial-gradient(
+    ellipse 60% 54% at 54% 52%,
+    rgba(212, 166, 98, 0.26) 0%,
+    rgba(226, 192, 136, 0.14) 44%,
+    rgba(236, 210, 168, 0.04) 68%,
+    transparent 82%
+  );
+  filter: blur(20px);
+  animation: letter-wc-bloom-ochre 11.2s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.letter-wc-blush {
+  background: radial-gradient(
+    ellipse 56% 52% at 50% 50%,
+    rgba(212, 152, 134, 0.19) 0%,
+    rgba(228, 182, 164, 0.09) 46%,
+    transparent 76%
+  );
+  filter: blur(22px);
+  animation: letter-wc-bloom-blush 13.4s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+/* Delicate carved Chinese seal stamp */
+.letter-seal-stamp {
+  border: 1px solid rgba(176, 86, 66, 0.48);
+  color: rgba(164, 72, 54, 0.82);
+  background: radial-gradient(circle at 40% 35%, rgba(188, 92, 72, 0.08) 0%, rgba(188, 92, 72, 0.03) 100%);
+  box-shadow: inset 0 0 0 1.5px rgba(244, 237, 225, 0.7);
+}
+
+/* =========================================================
+   Abstract Drifting Watercolor Mist Beneath Brand Title
+   Pure CSS animations — delicate Sage Green & Warm Ochre
+   Paper-soaking multiply blend for authentic wet pigment aura
+   ========================================================= */
+
+@keyframes brand-wash-drift-sage {
+  0%, 100% {
+    transform: translate3d(-14px, 2px, 0) scale(0.95, 0.92) rotate(-3deg);
+    opacity: 0.62;
+  }
+  38% {
+    transform: translate3d(10px, -4px, 0) scale(1.09, 1.04) rotate(2deg);
+    opacity: 0.86;
+  }
+  72% {
+    transform: translate3d(18px, 3px, 0) scale(1.02, 0.96) rotate(4deg);
+    opacity: 0.72;
+  }
+}
+
+@keyframes brand-wash-drift-ochre {
+  0%, 100% {
+    transform: translate3d(16px, -2px, 0) scale(1.04, 0.94) rotate(3deg);
+    opacity: 0.58;
+  }
+  44% {
+    transform: translate3d(-12px, 4px, 0) scale(0.94, 1.06) rotate(-2.5deg);
+    opacity: 0.84;
+  }
+  78% {
+    transform: translate3d(-4px, -3px, 0) scale(1.08, 0.98) rotate(1.5deg);
+    opacity: 0.68;
+  }
+}
+
+@keyframes brand-wash-drift-veil {
+  0%, 100% {
+    transform: translate3d(0px, 0px, 0) scaleX(0.92) scaleY(1);
+    opacity: 0.48;
+  }
+  50% {
+    transform: translate3d(8px, -2px, 0) scaleX(1.1) scaleY(1.08);
+    opacity: 0.78;
+  }
+}
+
+.brand-under-wash-sage {
+  border-radius: 58% 42% 64% 36% / 48% 62% 38% 52%;
+  background: radial-gradient(
+    ellipse 64% 58% at 44% 52%,
+    rgba(116, 162, 146, 0.42) 0%,
+    rgba(74, 130, 118, 0.24) 38%,
+    rgba(148, 186, 172, 0.12) 64%,
+    transparent 82%
+  );
+  mix-blend-mode: multiply;
+  filter: blur(11px);
+  animation: brand-wash-drift-sage 14.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.brand-under-wash-ochre {
+  border-radius: 44% 56% 38% 62% / 58% 42% 56% 44%;
+  background: radial-gradient(
+    ellipse 66% 56% at 56% 48%,
+    rgba(216, 170, 102, 0.44) 0%,
+    rgba(201, 150, 59, 0.22) 40%,
+    rgba(228, 194, 138, 0.12) 66%,
+    transparent 82%
+  );
+  mix-blend-mode: multiply;
+  filter: blur(12px);
+  animation: brand-wash-drift-ochre 17.2s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.brand-under-wash-veil {
+  border-radius: 62% 38% 52% 48% / 44% 56% 44% 56%;
+  background: linear-gradient(
+    96deg,
+    transparent 4%,
+    rgba(124, 168, 152, 0.24) 28%,
+    rgba(198, 174, 126, 0.2) 52%,
+    rgba(214, 168, 100, 0.25) 74%,
+    transparent 96%
+  );
+  mix-blend-mode: multiply;
+  filter: blur(8px);
+  animation: brand-wash-drift-veil 20s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+/* =========================================================
+   Chat Season-Aware Ambient Light Filter (季节感知动态光效)
+   Subtle shifting window daylight & botanical atmospheric wash
+   over Washi, Linen, and Cotton paper overlays
+   ========================================================= */
+
+@keyframes season-light-drift-a {
+  0%, 100% {
+    transform: translate3d(-4%, -3%, 0) scale(0.96);
+    opacity: 0.62;
+  }
+  50% {
+    transform: translate3d(6%, 5%, 0) scale(1.1);
+    opacity: 0.92;
+  }
+}
+
+@keyframes season-light-drift-b {
+  0%, 100% {
+    transform: translate3d(5%, 4%, 0) scale(1.06);
+    opacity: 0.54;
+  }
+  50% {
+    transform: translate3d(-5%, -4%, 0) scale(0.94);
+    opacity: 0.84;
+  }
+}
+
+@keyframes season-sunbeam-sway {
+  0%, 100% {
+    transform: translate3d(-6%, -2%, 0) rotate(-18deg) scaleX(0.94);
+    opacity: 0.42;
+  }
+  50% {
+    transform: translate3d(8%, 3%, 0) rotate(-14deg) scaleX(1.08);
+    opacity: 0.78;
+  }
+}
+
+.season-glow-primary {
+  animation: season-light-drift-a 16s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.season-glow-secondary {
+  animation: season-light-drift-b 21s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.season-sunbeam-sweep {
+  animation: season-sunbeam-sway 19s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+/* Spring — 柔和春芽绿光 & 浅樱雾 */
+.chat-season-spring .season-glow-primary {
+  background: radial-gradient(
+    ellipse 64% 58% at 24% 18%,
+    rgba(118, 184, 150, 0.28) 0%,
+    rgba(146, 204, 174, 0.14) 44%,
+    transparent 76%
+  );
+}
+
+.chat-season-spring .season-glow-secondary {
+  background: radial-gradient(
+    ellipse 60% 54% at 82% 80%,
+    rgba(162, 208, 178, 0.22) 0%,
+    rgba(232, 200, 188, 0.13) 48%,
+    transparent 78%
+  );
+}
+
+.chat-season-spring .season-sunbeam-sweep {
+  background: linear-gradient(
+    115deg,
+    transparent 15%,
+    rgba(154, 214, 182, 0.16) 44%,
+    rgba(246, 250, 236, 0.22) 56%,
+    transparent 82%
+  );
+}
+
+/* Summer — 清风翠荫与晨露微光 */
+.chat-season-summer .season-glow-primary {
+  background: radial-gradient(
+    ellipse 64% 58% at 22% 16%,
+    rgba(116, 186, 182, 0.26) 0%,
+    rgba(154, 210, 204, 0.13) 44%,
+    transparent 76%
+  );
+}
+
+.chat-season-summer .season-glow-secondary {
+  background: radial-gradient(
+    ellipse 60% 54% at 84% 78%,
+    rgba(232, 218, 154, 0.22) 0%,
+    rgba(148, 204, 196, 0.12) 48%,
+    transparent 78%
+  );
+}
+
+.chat-season-summer .season-sunbeam-sweep {
+  background: linear-gradient(
+    115deg,
+    transparent 14%,
+    rgba(168, 224, 218, 0.16) 44%,
+    rgba(255, 252, 232, 0.22) 56%,
+    transparent 82%
+  );
+}
+
+/* Autumn — 温暖金光与琥珀夕照 */
+.chat-season-autumn .season-glow-primary {
+  background: radial-gradient(
+    ellipse 66% 60% at 22% 18%,
+    rgba(226, 174, 88, 0.3) 0%,
+    rgba(236, 196, 128, 0.15) 45%,
+    transparent 76%
+  );
+}
+
+.chat-season-autumn .season-glow-secondary {
+  background: radial-gradient(
+    ellipse 62% 56% at 82% 82%,
+    rgba(212, 146, 94, 0.24) 0%,
+    rgba(234, 198, 142, 0.13) 48%,
+    transparent 78%
+  );
+}
+
+.chat-season-autumn .season-sunbeam-sweep {
+  background: linear-gradient(
+    115deg,
+    transparent 15%,
+    rgba(238, 194, 114, 0.18) 44%,
+    rgba(255, 245, 218, 0.24) 56%,
+    transparent 82%
+  );
+}
+
+/* Winter — 静谧雪霁清辉与炉火柔暖 */
+.chat-season-winter .season-glow-primary {
+  background: radial-gradient(
+    ellipse 64% 58% at 24% 16%,
+    rgba(164, 192, 210, 0.26) 0%,
+    rgba(196, 216, 228, 0.13) 44%,
+    transparent 76%
+  );
+}
+
+.chat-season-winter .season-glow-secondary {
+  background: radial-gradient(
+    ellipse 60% 54% at 80% 82%,
+    rgba(236, 208, 176, 0.22) 0%,
+    rgba(186, 208, 220, 0.12) 48%,
+    transparent 78%
+  );
+}
+
+.chat-season-winter .season-sunbeam-sweep {
+  background: linear-gradient(
+    115deg,
+    transparent 16%,
+    rgba(202, 224, 238, 0.17) 44%,
+    rgba(255, 252, 248, 0.24) 56%,
+    transparent 82%
+  );
+}
+
+/* Paper-specific optical response so light blends naturally with each textile */
+.season-paper-washi {
+  mix-blend-mode: multiply;
+  opacity: calc(0.94 * var(--season-intensity, 1));
+}
+
+.season-paper-linen {
+  mix-blend-mode: multiply;
+  opacity: calc(0.86 * var(--season-intensity, 1));
+}
+
+.season-paper-cotton {
+  mix-blend-mode: multiply;
+  opacity: calc(0.9 * var(--season-intensity, 1));
+}
+
+.season-paper-washi .season-sunbeam-sweep,
+.season-paper-linen .season-sunbeam-sweep,
+.season-paper-cotton .season-sunbeam-sweep {
+  filter: brightness(var(--sunbeam-brightness, 1));
+}
+
+/* =========================================================
+   Day/Night Alternating Light Filter (昼夜交替光影强度与色温)
+   Morning warm glow · Noon crisp clarity · Night serene cool light
+   ========================================================= */
+
+@keyframes day-veil-breathe {
+  0%, 100% {
+    transform: translate3d(-2%, -2%, 0) scale(0.98);
+    opacity: 0.72;
+  }
+  50% {
+    transform: translate3d(3%, 2%, 0) scale(1.04);
+    opacity: 1;
+  }
+}
+
+.day-phase-layer {
+  animation: day-veil-breathe 22s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+/* 早晨 — 柔和暖光（晨曦浅杏与低角度暖阳） */
+.chat-day-morning {
+  --season-intensity: 0.92;
+  --sunbeam-brightness: 1.04;
+}
+
+.chat-day-morning .day-phase-veil {
+  background:
+    radial-gradient(
+      ellipse 72% 62% at 14% 12%,
+      rgba(244, 198, 132, 0.25) 0%,
+      rgba(248, 218, 168, 0.12) 44%,
+      transparent 76%
+    ),
+    linear-gradient(
+      145deg,
+      rgba(255, 232, 194, 0.14) 0%,
+      rgba(255, 246, 228, 0.04) 55%,
+      transparent 100%
+    );
+  mix-blend-mode: multiply;
+}
+
+/* 正午 — 清透光（明亮通透天光与高光微泽） */
+.chat-day-noon {
+  --season-intensity: 1.08;
+  --sunbeam-brightness: 1.12;
+}
+
+.chat-day-noon .day-phase-veil {
+  background:
+    radial-gradient(
+      ellipse 78% 58% at 50% 6%,
+      rgba(255, 254, 248, 0.56) 0%,
+      rgba(248, 252, 250, 0.24) 48%,
+      transparent 78%
+    ),
+    radial-gradient(
+      ellipse 64% 48% at 78% 24%,
+      rgba(214, 236, 234, 0.16) 0%,
+      transparent 70%
+    );
+  mix-blend-mode: soft-light;
+}
+
+/* 夜晚 — 静谧冷光（月色青灰雾霭与低亮度静夜感） */
+.chat-day-night {
+  --season-intensity: 0.64;
+  --sunbeam-brightness: 0.72;
+}
+
+.chat-day-night .day-phase-veil {
+  background:
+    radial-gradient(
+      ellipse 76% 64% at 84% 12%,
+      rgba(116, 146, 180, 0.24) 0%,
+      rgba(138, 166, 196, 0.12) 46%,
+      transparent 78%
+    ),
+    radial-gradient(
+      ellipse 68% 60% at 18% 86%,
+      rgba(86, 110, 142, 0.16) 0%,
+      transparent 74%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(96, 120, 152, 0.11) 0%,
+      rgba(118, 140, 166, 0.06) 52%,
+      rgba(78, 98, 128, 0.12) 100%
+    );
+  mix-blend-mode: multiply;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
