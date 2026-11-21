@@ -30,6 +30,8 @@ import {
   type ChatPaperTextureId,
   type ChatSeasonMode,
 } from '../components/ChatPaperTheme';
+import { ChatMemorySnapshot } from '../components/ChatMemorySnapshot';
+import { ChatMemoryBubblesLayer, useChatMemoryBubbles } from '../components/ChatMemoryBubbles';
 import { haptic } from '../lib/haptics';
 import { speakDollLine, stopDollVoice } from '../lib/dollVoice';
 
@@ -77,6 +79,12 @@ export function DollChatPage() {
   const autoVoiceRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  const {
+    bubbles: memoryBubbles,
+    handleCanvasClick: handleBlankCanvasClick,
+    dismissBubble: dismissMemoryBubble,
+  } = useChatMemoryBubbles(messages, memories, doll);
 
   useEffect(() => {
     autoVoiceRef.current = autoVoice;
@@ -642,6 +650,21 @@ export function DollChatPage() {
             </div>
           </div>
 
+          {/* Top Memory Snapshot — Shared Keywords & Expandable Key Dialogue Memoir */}
+          <div className={mobileTab === 'memory' ? 'hidden lg:block' : 'block'}>
+            <ChatMemorySnapshot
+              doll={doll}
+              memories={memories}
+              messages={messages}
+              speakingId={speakingId}
+              onSpeakExcerpt={(id, text) => toggleSpeak(id, text)}
+              onOpenRememberComposer={() => {
+                setRememberToggle(true);
+                bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+              }}
+            />
+          </div>
+
           {/* Mobile Inline Memory Panel (replaces sliding drawer) */}
           {mobileTab === 'memory' && (
             <div className="relative z-10 lg:hidden flex-1 p-4 space-y-4">
@@ -664,12 +687,18 @@ export function DollChatPage() {
             </div>
           )}
 
-          {/* Messages Stream (Natural Document Flow, No Nested Scrollbox) */}
+          {/* Messages Stream (Natural Document Flow, Blank-Space Tap Spawns Memory Bubbles) */}
           <div
+            onClick={handleBlankCanvasClick}
             className={`relative z-10 ${
               mobileTab === 'memory' ? 'hidden lg:block' : 'block'
             } flex-1 px-4 sm:px-5 py-4 sm:py-6 space-y-4 sm:space-y-5`}
           >
+            <ChatMemoryBubblesLayer
+              bubbles={memoryBubbles}
+              onDismiss={dismissMemoryBubble}
+            />
+
             {/* Opening Line */}
             {(() => {
               const isOpeningSpeaking = speakingId === 'opening';
@@ -680,10 +709,13 @@ export function DollChatPage() {
                   transition={{ duration: 0.28, ease: EASE_STUDIO }}
                   className="flex items-start gap-2.5 max-w-[88%] sm:max-w-[84%]"
                 >
-                  <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full sm:rounded-lg overflow-hidden border border-[#EAE2D6] bg-white p-0.5 shrink-0 mt-0.5">
+                  <div
+                    data-memory-bubble-ignore="true"
+                    className="w-7 h-7 sm:w-8 sm:h-8 rounded-full sm:rounded-lg overflow-hidden border border-[#EAE2D6] bg-white p-0.5 shrink-0 mt-0.5"
+                  >
                     <SafeImage src={doll.avatarUrl} alt={doll.name} className="w-full h-full object-contain" />
                   </div>
-                  <div className="space-y-1.5 min-w-0">
+                  <div data-memory-bubble-ignore="true" className="space-y-1.5 min-w-0">
                     <div className="text-[11px] text-[#9A887B] flex items-center gap-1.5">
                       <span>{doll.name}</span>
                       {isOpeningSpeaking && (
@@ -724,7 +756,7 @@ export function DollChatPage() {
                     transition={{ type: 'spring', stiffness: 380, damping: 28 }}
                     className="flex justify-end"
                   >
-                    <div className="max-w-[84%]">
+                    <div data-memory-bubble-ignore="true" className="max-w-[84%]">
                       <div className="px-3.5 py-2.5 sm:px-4 sm:py-3 rounded-[20px] rounded-tr-md chat-bubble-user text-[#24463E] text-[14.5px] sm:text-sm leading-relaxed whitespace-pre-wrap">
                         {msg.content}
                       </div>
@@ -746,10 +778,13 @@ export function DollChatPage() {
                   transition={{ type: 'spring', stiffness: 360, damping: 28 }}
                   className="flex items-start gap-2.5 max-w-[88%] sm:max-w-[84%]"
                 >
-                  <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full sm:rounded-lg overflow-hidden border border-[#EAE2D6] bg-white p-0.5 shrink-0 mt-0.5">
+                  <div
+                    data-memory-bubble-ignore="true"
+                    className="w-7 h-7 sm:w-8 sm:h-8 rounded-full sm:rounded-lg overflow-hidden border border-[#EAE2D6] bg-white p-0.5 shrink-0 mt-0.5"
+                  >
                     <SafeImage src={doll.avatarUrl} alt={doll.name} className="w-full h-full object-contain" />
                   </div>
-                  <div className="space-y-1.5 min-w-0">
+                  <div data-memory-bubble-ignore="true" className="space-y-1.5 min-w-0">
                     <div className="text-[11px] text-[#9A887B] flex flex-wrap items-center gap-1.5">
                       <span>{doll.name}</span>
                       {msg.provider && (
@@ -846,6 +881,7 @@ export function DollChatPage() {
 
             {streamError && (
               <motion.div
+                data-memory-bubble-ignore="true"
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
                 className="p-3.5 rounded-xl border border-[#E5B8B0] bg-[#FDF2F0] text-xs text-[#9E3D2E] flex flex-wrap items-center justify-between gap-2"
@@ -867,6 +903,13 @@ export function DollChatPage() {
                 )}
               </motion.div>
             )}
+
+            {/* Whisper-quiet blank-space interaction cue */}
+            <div className="pt-4 pb-1 text-center select-none">
+              <span className="text-[11px] tracking-wide text-[#ACA093]/85">
+                轻点空白纸面，浮现近期记忆气泡
+              </span>
+            </div>
 
             <div ref={bottomRef} />
           </div>
