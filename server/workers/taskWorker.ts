@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { config } from '../config.ts';
-import { db, recordRunLog } from '../db.ts';
+import { db, getMaterialsByIds, getRuntimeSettings, recordRunLog } from '../db.ts';
 import { getImageProvider } from '../providers/imageProvider.ts';
 import { getOutputProvider } from '../providers/outputProvider.ts';
 
@@ -20,6 +20,7 @@ interface QueuedVersionRow {
   persona_name: string;
   persona_mbti: string;
   persona_material_hint: string;
+  persona_visual_trait: string;
 }
 
 interface QueuedOutputJobRow {
@@ -58,7 +59,6 @@ export function enqueueOutputJob(jobId: string): void {
 
 async function processImageVersion(versionId: string): Promise<void> {
   const now = new Date().toISOString();
-  // Atomic transition queued -> running; if already cancelled or not queued, stop immediately
   const claim = db
     .prepare(
       `UPDATE card_versions
@@ -75,7 +75,8 @@ async function processImageVersion(versionId: string): Promise<void> {
     .prepare(
       `SELECT cv.id, cv.card_id, cv.version_number, cv.provider,
               c.photo_ref, c.photo_mime, c.photo_expires_at, c.user_nickname, c.persona_id, c.accessory_ids,
-              p.name AS persona_name, p.mbti AS persona_mbti, p.material_hint AS persona_material_hint
+              p.name AS persona_name, p.mbti AS persona_mbti, p.material_hint AS persona_material_hint,
+              p.visual_trait AS persona_visual_trait
        FROM card_versions cv
        JOIN cards c ON c.id = cv.card_id
        JOIN personas p ON p.id = c.persona_id
@@ -87,7 +88,12 @@ async function processImageVersion(versionId: string): Promise<void> {
 
   const photoPath = path.join(config.storagePath, 'photos', row.photo_ref);
   if (!fs.existsSync(photoPath) || new Date(row.photo_expires_at).getTime() < Date.now()) {
-    finalizeVersionFailure(versionId, row.provider, 'PHOTO_EXPIRED', '原始照片已过期清理，无法继续生成，请新建创作并重新上传');
+    finalizeVersionFailure(
+      versionId,
+      row.provider,
+      'PHOTO_EXPIRED',
+      '原始照片已过期清理，无法继续生成，请新建创作并重新上传'
+    );
     return;
   }
 
@@ -98,10 +104,12 @@ async function processImageVersion(versionId: string): Promise<void> {
   }, config.imageTimeoutMs);
 
   const startedMs = Date.now();
+  const runtimeSettings = getRuntimeSettings();
 
   try {
     const photoBuffer = fs.readFileSync(photoPath);
     const accessoryIds = JSON.parse(row.accessory_ids || '[]') as string[];
+    const selectedMaterials = getMaterialsByIds(accessoryIds);
     const provider = getImageProvider(row.provider);
     const shouldFail = simulateFailVersions.delete(versionId);
 
@@ -117,14 +125,18 @@ async function processImageVersion(versionId: string): Promise<void> {
         personaName: row.persona_name,
         personaMbti: row.persona_mbti,
         personaMaterialHint: row.persona_material_hint,
+        personaVisualTrait: row.persona_visual_trait,
         accessoryIds,
+        selectedMaterials,
+        strictMaterialConstraint: runtimeSettings.strictMaterialConstraint,
+        imageModelTier: runtimeSettings.imageModelTier,
+        imageModel: runtimeSettings.imageModel,
         simulateFail: shouldFail,
       },
       controller.signal
     );
 
     const finishedAt = new Date().toISOString();
-    // Guard against late-arriving results: ONLY update if still running!
     const updated = db
       .prepare(
         `UPDATE card_versions
@@ -158,7 +170,9 @@ async function processImageVersion(versionId: string): Promise<void> {
         status: 'succeeded',
         totalMs: result.latencyMs,
         requestId: result.providerRequestId,
-        detail: `card=${row.card_id} version=v${row.version_number}`,
+        detail: `card=${row.card_id} v${row.version_number} model=${
+          row.provider === 'cloud' ? runtimeSettings.imageModel : 'mock-svg'
+        } materials=${selectedMaterials.length}`,
       });
     }
   } catch (err: unknown) {

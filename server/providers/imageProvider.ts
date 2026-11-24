@@ -2,8 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { GoogleGenAI } from '@google/genai';
-import { config, isImageCloudConfigured } from '../config.ts';
+import {
+  config,
+  IMAGE_MODEL_BY_TIER,
+  isImageCloudConfigured,
+  type ImageModelTier,
+} from '../config.ts';
 import { FALLBACK_TEMPLATES, getAccessoryLabels } from '../data/seed.ts';
+import type { MaterialRecord } from '../db.ts';
 
 export interface ImageGenerateInput {
   cardId: string;
@@ -16,7 +22,12 @@ export interface ImageGenerateInput {
   personaName: string;
   personaMbti: string;
   personaMaterialHint: string;
+  personaVisualTrait?: string;
   accessoryIds: string[];
+  selectedMaterials: MaterialRecord[];
+  strictMaterialConstraint: boolean;
+  imageModelTier: ImageModelTier;
+  imageModel: string;
   simulateFail?: boolean;
 }
 
@@ -35,15 +46,31 @@ export interface ImageProvider {
   generate(input: ImageGenerateInput, signal: AbortSignal): Promise<ImageGenerateResult>;
 }
 
-function buildDollImagePrompt(input: ImageGenerateInput): string {
-  const accessories = getAccessoryLabels(input.accessoryIds);
-  const accText = accessories.length > 0 ? accessories.join('、') : input.personaMaterialHint;
+export function buildDollImagePrompt(input: ImageGenerateInput): string {
+  const matLines =
+    input.selectedMaterials.length > 0
+      ? input.selectedMaterials
+          .map((m) => `- ${m.label} (${m.material}): ${m.visualHint}`)
+          .join('\n')
+      : `- Natural dried nut shell doll base with cotton-linen cloth body (${input.personaMaterialHint})`;
+
+  const strictRules = input.strictMaterialConstraint
+    ? 'STRICT CRAFTABILITY RULE: Every visible component of this doll MUST be physically buildable in a real campus craft workshop using ONLY the selected real materials above (natural dried nut shells, wool yarn, woven cotton/linen fabric, wooden beads, twine, brass bells, dried flowers). Do NOT invent sci-fi holograms, glowing neon crystals, glass wings, metallic armor, or uncraftable fantasy props.'
+    : 'Prefer real tactile craft textures (natural nut shells, wool yarn, cotton-linen cloth, wooden beads, dried botanicals) while keeping a charming handmade toy silhouette.';
+
+  const mbtiVisual =
+    input.personaVisualTrait ||
+    `Distinct ${input.personaMbti} (${input.personaName}) posture, charming expression, and hand-stitched outfit silhouette.`;
+
   return [
-    'Hand-painted watercolor and colored-pencil storybook character illustration of an adorable miniature handmade fabric and natural nut doll on a pure clean white background, inspired softly by the person in the reference photo (hair color/curl vibe, cheerful expression, cozy aesthetic—NOT a realistic human).',
-    'Signature style: fluffy curly wool yarn hair, patchwork plaid cloth outfit with visible hand-stitching, carved wooden buttons, delicate lace trim, tiny dark glossy bead eyes, rosy cheeks with subtle freckle dots, small round coral/peach nose, braided twine legs with miniature nut shells or brass bells.',
-    `Persona craft vibe: ${input.personaMbti} (${input.personaName}), handmade accessories: ${accText}.`,
-    'Warm milky-apricot brown and soft mint-green Japanese zakka journal watercolor palette, gentle shadow beneath feet, pure white background, no text, no watermark.',
-  ].join(' ');
+    'Hand-painted Japanese zakka watercolor and colored-pencil storybook character illustration of an adorable miniature handmade natural nut-shell and fabric doll centered on a pure clean white studio paper background.',
+    'Inspiration from reference photo: softly borrow the person’s hair silhouette/tone vibe, smile warmth, and general color mood—transformed completely into a tactile 12cm handmade nut-craft doll (NOT a realistic human portrait).',
+    `16-MBTI Personality Visual Mapping (${input.personaMbti} · ${input.personaName}): ${mbtiVisual}`,
+    'Selected Real Craft Workshop Materials to Render Faithfully:',
+    matLines,
+    strictRules,
+    'Art direction: visible delicate watercolor washes, fine colored-pencil stitch lines, tiny glossy dark bead eyes, gentle coral-peach rosy cheeks, soft grounded watercolor shadow beneath feet, pure crisp white background, single centered full-body doll, zero text, zero letters, zero watermark.',
+  ].join('\n');
 }
 
 function resolveLocalAssetFile(urlPath: string): { absPath: string; mime: string } | null {
@@ -70,13 +97,20 @@ function saveGeneratedAsset(versionId: string, ext: string, data: Buffer): strin
   return `/api/assets/generated/${filename}`;
 }
 
+function getDisplayLabels(input: ImageGenerateInput): string[] {
+  if (input.selectedMaterials.length > 0) {
+    return input.selectedMaterials.map((m) => m.label);
+  }
+  return getAccessoryLabels(input.accessoryIds);
+}
+
 class CloudImageProvider implements ImageProvider {
   readonly mode = 'cloud' as const;
 
   async generate(input: ImageGenerateInput, signal: AbortSignal): Promise<ImageGenerateResult> {
     if (!isImageCloudConfigured()) {
       throw Object.assign(
-        new Error('真实生图服务未配置密钥（请配置 IMAGE_API_KEY 或 GEMINI_API_KEY）'),
+        new Error('真实生图服务未配置密钥（请在 Settings > Secrets 配置 GEMINI_API_KEY 或 IMAGE_API_KEY）'),
         { code: 'PROVIDER_NOT_CONFIGURED' }
       );
     }
@@ -106,6 +140,8 @@ class CloudImageProvider implements ImageProvider {
       },
     });
 
+    const targetModel = input.imageModel || IMAGE_MODEL_BY_TIER[input.imageModelTier] || IMAGE_MODEL_BY_TIER.fast;
+
     const abortPromise = new Promise<never>((_, reject) => {
       if (signal.aborted) {
         reject(Object.assign(new Error('生图任务已超时或取消'), { code: 'GENERATION_TIMEOUT' }));
@@ -118,28 +154,56 @@ class CloudImageProvider implements ImageProvider {
       );
     });
 
-    const response = await Promise.race([
-      ai.models.generateContent({
-        model: config.imageModel,
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: input.photoBuffer.toString('base64'),
-                mimeType: input.photoMime,
+    let response;
+    try {
+      response = await Promise.race([
+        ai.models.generateContent({
+          model: targetModel,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  data: input.photoBuffer.toString('base64'),
+                  mimeType: input.photoMime,
+                },
               },
-            },
-            { text: prompt },
-          ],
-        },
-        config: {
-          imageConfig: {
-            aspectRatio: '3:4',
+              { text: prompt },
+            ],
           },
-        },
-      }),
-      abortPromise,
-    ]);
+          config: {
+            imageConfig: {
+              aspectRatio: '3:4',
+              ...(input.imageModelTier === 'hd' ? { imageSize: '1K' } : {}),
+            },
+          },
+        }),
+        abortPromise,
+      ]);
+    } catch (err: unknown) {
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      if (rawMsg.includes('GENERATION_TIMEOUT') || signal.aborted) {
+        throw Object.assign(new Error('Nano 图像生成超过超时上限，可重试或使用预设模板兜底'), {
+          code: 'GENERATION_TIMEOUT',
+        });
+      }
+      if (
+        rawMsg.includes('429') ||
+        rawMsg.includes('RESOURCE_EXHAUSTED') ||
+        rawMsg.includes('403') ||
+        rawMsg.includes('PERMISSION_DENIED') ||
+        rawMsg.includes('billing')
+      ) {
+        throw Object.assign(
+          new Error(
+            `Google Nano 模型（${targetModel}）需要已开通计费的 Gemini API Key。请在 Settings > Secrets 配置有效密钥，或先点击下方「预设模板兜底」或在 /dev 控制台切换演示模式。`
+          ),
+          { code: 'PROVIDER_QUOTA_OR_BILLING' }
+        );
+      }
+      throw Object.assign(new Error(`Google Nano 出图调用失败：${rawMsg.slice(0, 200)}`), {
+        code: 'PROVIDER_ERROR',
+      });
+    }
 
     const parts = response.candidates?.[0]?.content?.parts ?? [];
     for (const part of parts) {
@@ -148,19 +212,22 @@ class CloudImageProvider implements ImageProvider {
         const ext = mime.includes('jpeg') ? 'jpg' : mime.includes('webp') ? 'webp' : 'png';
         const imgBuf = Buffer.from(part.inlineData.data, 'base64');
         const resultUrl = saveGeneratedAsset(input.versionId, ext, imgBuf);
+        const labels = getDisplayLabels(input);
         return {
           resultUrl,
           resultKind: 'generated',
           provider: 'cloud',
-          providerRequestId: `gemini_img_${crypto.randomBytes(6).toString('hex')}`,
+          providerRequestId: `nano_${input.imageModelTier}_${crypto.randomBytes(5).toString('hex')}`,
           latencyMs: Date.now() - startedAt,
           suggestedName: `${input.personaName.slice(0, 2)}小果`,
-          keywords: [input.personaMbti, ...getAccessoryLabels(input.accessoryIds).slice(0, 2)],
+          keywords: [input.personaMbti, ...labels.slice(0, 2)],
         };
       }
     }
 
-    throw Object.assign(new Error('云端模型未返回图像数据'), { code: 'PROVIDER_ERROR' });
+    throw Object.assign(new Error(`Google Nano（${targetModel}）未返回图像数据，请稍后重试`), {
+      code: 'PROVIDER_ERROR',
+    });
   }
 
   private async generateViaOpenAICompatible(
@@ -177,7 +244,7 @@ class CloudImageProvider implements ImageProvider {
         Authorization: `Bearer ${config.imageApiKey}`,
       },
       body: JSON.stringify({
-        model: config.imageModel,
+        model: input.imageModel || config.imageModel,
         prompt,
         size: '1024x1024',
         response_format: 'b64_json',
@@ -217,6 +284,7 @@ class CloudImageProvider implements ImageProvider {
     }
 
     const resultUrl = saveGeneratedAsset(input.versionId, ext, imgBuf);
+    const labels = getDisplayLabels(input);
     return {
       resultUrl,
       resultKind: 'generated',
@@ -224,7 +292,7 @@ class CloudImageProvider implements ImageProvider {
       providerRequestId: response.headers.get('x-request-id') || `cloud_img_${crypto.randomBytes(6).toString('hex')}`,
       latencyMs: Date.now() - startedAt,
       suggestedName: `${input.personaName.slice(0, 2)}小果`,
-      keywords: [input.personaMbti, ...getAccessoryLabels(input.accessoryIds).slice(0, 2)],
+      keywords: [input.personaMbti, ...labels.slice(0, 2)],
     };
   }
 }
@@ -243,7 +311,7 @@ class MockImageProvider implements ImageProvider {
 
   async generate(input: ImageGenerateInput, signal: AbortSignal): Promise<ImageGenerateResult> {
     const startedAt = Date.now();
-    const delayMs = 1800 + (input.versionNumber % 3) * 350;
+    const delayMs = 1500 + (input.versionNumber % 3) * 300;
 
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(resolve, delayMs);
@@ -279,8 +347,8 @@ class MockImageProvider implements ImageProvider {
 
     const tapeColors = ['#B9DDD3', '#E8D2B5', '#D6CBE0'];
     const tapeColor = tapeColors[(input.versionNumber - 1) % tapeColors.length];
-    const accessories = getAccessoryLabels(input.accessoryIds);
-    const accSummary = accessories.length > 0 ? accessories.slice(0, 3).join(' · ') : input.personaMaterialHint;
+    const labels = getDisplayLabels(input);
+    const accSummary = labels.length > 0 ? labels.slice(0, 3).join(' · ') : input.personaMaterialHint;
 
     const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="900" height="1060" viewBox="0 0 900 1060">
@@ -307,7 +375,7 @@ class MockImageProvider implements ImageProvider {
   </text>
   <line x1="98" y1="902" x2="802" y2="902" stroke="#E8DCCB" stroke-width="1.5" stroke-dasharray="5 5"/>
   <text x="98" y="942" font-family="sans-serif" font-size="20" fill="#876E5D">
-    定制给 ${escapeXml(input.userNickname)} · 配饰：${escapeXml(accSummary)}
+    定制给 ${escapeXml(input.userNickname)} · 在库材料：${escapeXml(accSummary)}
   </text>
   <text x="98" y="976" font-family="monospace" font-size="14" fill="#A69080">
     果壳碰碰手帐本 · 版本编号 ${escapeXml(input.versionId)}
@@ -321,6 +389,18 @@ class MockImageProvider implements ImageProvider {
       INTJ: '紫雾松果',
       INFP: '蜜桃小云',
       ESTP: '焦糖阿奔',
+      INFJ: '青岚橡果',
+      ENFJ: '向阳榛子',
+      INTP: '松墨核桃',
+      ENTP: '跳跳松子',
+      ENTJ: '金穗松果',
+      ISTJ: '方格栗壳',
+      ISFJ: '暖绒栗子',
+      ESTJ: '铜铃核桃',
+      ESFJ: '蜜糖榛果',
+      ISTP: '铆钉栗子',
+      ISFP: '露草橡果',
+      ESFP: '霓虹彩果',
     };
 
     return {
@@ -330,7 +410,7 @@ class MockImageProvider implements ImageProvider {
       providerRequestId: `mock_img_${crypto.randomBytes(6).toString('hex')}`,
       latencyMs: Date.now() - startedAt,
       suggestedName: nameSuggestions[input.personaMbti] || `${input.personaName.slice(0, 2)}小果`,
-      keywords: [input.personaMbti, ...accessories.slice(0, 2)],
+      keywords: [input.personaMbti, ...labels.slice(0, 2)],
     };
   }
 }

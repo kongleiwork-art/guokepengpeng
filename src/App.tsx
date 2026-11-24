@@ -2,6 +2,8 @@ import { useEffect } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { HomePage } from './pages/HomePage';
+import { PlazaPage } from './pages/PlazaPage';
+import { NfcRedirectPage } from './pages/NfcRedirectPage';
 import { DollProfilePage } from './pages/DollProfilePage';
 import { DollChatPage } from './pages/DollChatPage';
 import { CreatePage } from './pages/CreatePage';
@@ -21,6 +23,8 @@ export default function App() {
       <Layout>
         <Routes>
           <Route path="/" element={<HomePage />} />
+          <Route path="/plaza" element={<PlazaPage />} />
+          <Route path="/nfc/:alias" element={<NfcRedirectPage />} />
           <Route path="/d/:dollId" element={<DollProfilePage />} />
           <Route path="/d/:dollId/chat" element={<DollChatPage />} />
           <Route path="/create" element={<CreatePage />} />

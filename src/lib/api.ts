@@ -8,9 +8,19 @@ import type {
   DollDetail,
   DollSummary,
   FallbackTemplate,
+  ImageModelTier,
+  MaterialCategory,
+  MaterialRecord,
+  MbtiGuideHistoryItem,
+  MbtiGuideTurnResponse,
+  MbtiQuizAnswers,
+  MbtiRecommendation,
+  CognitiveFunctionScores,
   MemoryItem,
   OutputJob,
   PersonaPublic,
+  ProviderMode,
+  RuntimeSettings,
   SessionInfo,
 } from './types';
 
@@ -27,6 +37,29 @@ export class ApiError extends Error {
   }
 }
 
+const VISITOR_KEY_STORAGE = 'nutshell_visitor_key_v1';
+
+/**
+ * Persistent browser-local visitor key paired with signed HttpOnly cookies
+ * so repeated NFC taps on mobile Safari / Chrome / WeChat never lose memories.
+ */
+export function getOrCreateVisitorKey(): string {
+  try {
+    const existing = localStorage.getItem(VISITOR_KEY_STORAGE);
+    if (existing && /^[a-zA-Z0-9_-]{12,80}$/.test(existing)) {
+      return existing;
+    }
+    const generated =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? `vk_${crypto.randomUUID().replace(/-/g, '')}`
+        : `vk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
+    localStorage.setItem(VISITOR_KEY_STORAGE, generated);
+    return generated;
+  } catch {
+    return 'vk_ephemeral_fallback_0001';
+  }
+}
+
 export function generateIdempotencyKey(prefix = 'idem'): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return `${prefix}_${crypto.randomUUID()}`;
@@ -35,9 +68,15 @@ export function generateIdempotencyKey(prefix = 'idem'): string {
 }
 
 async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (!headers.has('X-Visitor-Key')) {
+    headers.set('X-Visitor-Key', getOrCreateVisitorKey());
+  }
+
   const res = await fetch(url, {
     credentials: 'include',
     ...init,
+    headers,
   });
 
   if (res.status === 204) {
@@ -62,6 +101,22 @@ export const api = {
     return requestJson<SessionInfo>('/api/session', { method: 'POST' });
   },
 
+  createSessionClaimCode(): Promise<{ code: string; expiresAt: string; sessionId: string }> {
+    return requestJson('/api/session/claim-code', { method: 'POST' });
+  },
+
+  claimSessionByCode(code: string): Promise<{ sessionId: string; expiresAt: string; synced: boolean }> {
+    return requestJson('/api/session/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+  },
+
+  resolveNfcAlias(alias: string): Promise<{ alias: string; dollId: string; label: string }> {
+    return requestJson(`/api/nfc/resolve/${encodeURIComponent(alias)}`);
+  },
+
   listPersonas(): Promise<PersonaPublic[]> {
     return requestJson<PersonaPublic[]>('/api/personas');
   },
@@ -72,6 +127,33 @@ export const api = {
 
   listTemplates(): Promise<FallbackTemplate[]> {
     return requestJson<FallbackTemplate[]>('/api/templates');
+  },
+
+  recommendMbti(input: { photo?: File | null; quizAnswers?: MbtiQuizAnswers }): Promise<MbtiRecommendation> {
+    const formData = new FormData();
+    if (input.photo) {
+      formData.append('photo', input.photo);
+    }
+    if (input.quizAnswers) {
+      formData.append('quizAnswers', JSON.stringify(input.quizAnswers));
+    }
+    return requestJson<MbtiRecommendation>('/api/mbti/recommend', {
+      method: 'POST',
+      body: formData,
+    });
+  },
+
+  mbtiGuideTurn(input: {
+    history: MbtiGuideHistoryItem[];
+    rawScores?: Partial<CognitiveFunctionScores>;
+    maxRounds?: number;
+    forceConclude?: boolean;
+  }): Promise<MbtiGuideTurnResponse> {
+    return requestJson<MbtiGuideTurnResponse>('/api/mbti/guide/turn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
   },
 
   listDolls(): Promise<DollSummary[]> {
@@ -227,11 +309,124 @@ export const api = {
     return requestJson<OutputJob>(`/api/plot/jobs/${encodeURIComponent(jobId)}`);
   },
 
+  // ---- Admin APIs ----
   getDemoStatus(adminToken: string): Promise<DemoStatusPayload> {
     return requestJson<DemoStatusPayload>('/api/demo/status', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+  },
+
+  updateDemoSettings(
+    adminToken: string,
+    patch: Partial<{
+      nfcPublicBaseUrl: string;
+      imageModelTier: ImageModelTier;
+      chatProviderMode: ProviderMode;
+      imageProviderMode: ProviderMode;
+      strictMaterialConstraint: boolean;
+    }>
+  ): Promise<RuntimeSettings> {
+    return requestJson<RuntimeSettings>('/api/demo/settings', {
+      method: 'PATCH',
       headers: {
+        'Content-Type': 'application/json',
         Authorization: `Bearer ${adminToken}`,
       },
+      body: JSON.stringify(patch),
+    });
+  },
+
+  upsertNfcTag(
+    adminToken: string,
+    payload: { alias: string; dollId: string; label?: string }
+  ): Promise<{ alias: string; dollId: string; label: string; nfcUrl: string }> {
+    return requestJson('/api/demo/nfc-tags', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  },
+
+  markNfcTagWritten(adminToken: string, alias: string): Promise<{ alias: string; lastWrittenAt: string }> {
+    return requestJson(`/api/demo/nfc-tags/${encodeURIComponent(alias)}/written`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+  },
+
+  listAdminMaterials(
+    adminToken: string
+  ): Promise<{ categories: Record<MaterialCategory, string>; items: MaterialRecord[] }> {
+    return requestJson('/api/demo/materials', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+  },
+
+  upsertMaterial(
+    adminToken: string,
+    payload: {
+      id?: string;
+      label: string;
+      category: MaterialCategory;
+      material: string;
+      visualHint?: string;
+      inStock?: boolean;
+      sortOrder?: number;
+    }
+  ): Promise<MaterialRecord> {
+    return requestJson('/api/demo/materials', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateMaterial(
+    adminToken: string,
+    id: string,
+    patch: Partial<{
+      label: string;
+      category: MaterialCategory;
+      material: string;
+      visualHint: string;
+      inStock: boolean;
+    }>
+  ): Promise<MaterialRecord> {
+    return requestJson(`/api/demo/materials/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify(patch),
+    });
+  },
+
+  deleteMaterial(adminToken: string, id: string): Promise<void> {
+    return requestJson(`/api/demo/materials/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+  },
+
+  importMaterialsJson(
+    adminToken: string,
+    items: Array<Record<string, unknown>>,
+    mode: 'merge' | 'replace' = 'merge'
+  ): Promise<{ mode: string; importedCount: number; totalCount: number }> {
+    return requestJson('/api/demo/materials/import', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ mode, items }),
     });
   },
 
@@ -282,6 +477,7 @@ export async function streamDollChat(
     headers: {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
+      'X-Visitor-Key': getOrCreateVisitorKey(),
     },
     body: JSON.stringify(payload),
     signal,
@@ -353,7 +549,6 @@ export async function streamDollChat(
  * Compress & EXIF-normalize a photo on the client canvas so it stays <= 2 MB and upright.
  */
 export async function compressImageForUpload(file: Blob): Promise<File> {
-  // createImageBitmap applies EXIF orientation automatically in modern browsers
   const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(async () => {
     return createImageBitmap(file);
   });

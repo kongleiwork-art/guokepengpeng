@@ -1,8 +1,18 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { AnimatePresence, motion } from 'motion/react';
-import { ArrowLeft, Check, Copy, Download, MessageSquare, QrCode } from 'lucide-react';
+import {
+  ArrowLeft,
+  Check,
+  Copy,
+  Download,
+  KeyRound,
+  MessageSquare,
+  QrCode,
+  Radio,
+} from 'lucide-react';
 import { api } from '../lib/api';
+import { isIosDevice, isIphoneBackgroundReadCompatible, isWebNfcSupported, writeUrlToNfcTag } from '../lib/webNfc';
 import type { DollDetail, MemoryItem } from '../lib/types';
 import { SafeImage } from '../components/SafeImage';
 import { WatercolorProfileSkeleton } from '../components/WatercolorLoader';
@@ -20,6 +30,9 @@ const EASE_STUDIO = [0.22, 1, 0.36, 1] as const;
 
 export function DollProfilePage() {
   const { dollId = '' } = useParams();
+  const [searchParams] = useSearchParams();
+  const isNfcEntry = searchParams.get('entry') === 'nfc';
+
   const [doll, setDoll] = useState<DollDetail | null>(null);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -27,39 +40,99 @@ export function DollProfilePage() {
   const [copied, setCopied] = useState(false);
   const [mobileSection, setMobileSection] = useState<'overview' | 'memory'>('overview');
 
-  useEffect(() => {
-    let active = true;
+  // Web NFC write status
+  const [writingNfc, setWritingNfc] = useState(false);
+  const [nfcNotice, setNfcNotice] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Cross-browser 6-char memory claim code sync
+  const [claimCode, setClaimCode] = useState<string | null>(null);
+  const [claimInput, setClaimInput] = useState('');
+  const [claimStatus, setClaimStatus] = useState<string | null>(null);
+  const [claimBusy, setClaimBusy] = useState(false);
+
+  const loadDollData = async () => {
     setLoading(true);
     setError(null);
-    (async () => {
-      try {
-        await api.initSession();
-        const [d, mems] = await Promise.all([api.getDoll(dollId), api.getMemories(dollId)]);
-        if (!active) return;
-        setDoll(d);
-        setMemories(mems);
-      } catch (err) {
-        if (!active) return;
-        setError(err instanceof Error ? err.message : '加载角色档案失败');
-      } finally {
-        if (active) setLoading(false);
+    try {
+      await api.initSession();
+      const [d, mems] = await Promise.all([api.getDoll(dollId), api.getMemories(dollId)]);
+      setDoll(d);
+      setMemories(mems);
+      if (isNfcEntry) {
+        haptic('success');
       }
-    })();
-    return () => {
-      active = false;
-    };
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载角色档案失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadDollData();
   }, [dollId]);
+
+  const resolvedShareUrl = doll?.nfcUrl || doll?.dollUrl || `${window.location.origin}/d/${dollId}`;
 
   const handleCopyUrl = async () => {
     if (!doll) return;
-    const shareUrl = `${window.location.origin}/d/${doll.id}`;
     try {
-      await navigator.clipboard.writeText(shareUrl);
+      await navigator.clipboard.writeText(resolvedShareUrl);
       haptic('success');
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
     } catch {
       setCopied(false);
+    }
+  };
+
+  const handleWriteNfcTag = async () => {
+    if (!doll || writingNfc) return;
+    haptic('medium');
+    setWritingNfc(true);
+    if (isWebNfcSupported()) {
+      setNfcNotice({ ok: true, text: '请将空白 NTAG213/215 贴纸贴近手机背面 NFC 感应区…' });
+    }
+    const res = await writeUrlToNfcTag(resolvedShareUrl);
+    setWritingNfc(false);
+    setNfcNotice({ ok: res.ok, text: res.message });
+    haptic(res.ok ? 'success' : 'warning');
+  };
+
+  const handleGenerateClaimCode = async () => {
+    if (claimBusy) return;
+    setClaimBusy(true);
+    setClaimStatus(null);
+    try {
+      const res = await api.createSessionClaimCode();
+      setClaimCode(res.code);
+      haptic('success');
+      setClaimStatus('口令 24 小时有效，在 Safari / 微信等其他浏览器输入即可同步全部记忆。');
+    } catch (err) {
+      setClaimStatus(err instanceof Error ? err.message : '生成记忆口令失败');
+    } finally {
+      setClaimBusy(false);
+    }
+  };
+
+  const handleClaimSession = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = claimInput.trim().toUpperCase();
+    if (!cleaned || claimBusy) return;
+    setClaimBusy(true);
+    setClaimStatus(null);
+    try {
+      await api.claimSessionByCode(cleaned);
+      setClaimInput('');
+      haptic('success');
+      setClaimStatus('已同步记忆档案！正在刷新该角色记忆…');
+      const mems = await api.getMemories(dollId);
+      setMemories(mems);
+      setClaimStatus('跨端记忆同步成功，现在可以无缝续聊了。');
+    } catch (err) {
+      setClaimStatus(err instanceof Error ? err.message : '记忆口令无效或已过期');
+    } finally {
+      setClaimBusy(false);
     }
   };
 
@@ -71,10 +144,10 @@ export function DollProfilePage() {
     return (
       <div className="max-w-[720px] mx-auto px-4 sm:px-8 py-8">
         <div className="studio-card rounded-2xl p-6 space-y-4">
-          <h1 className="font-editorial text-xl font-semibold text-[#382A22]">
-            未找到该角色档案
-          </h1>
-          <p className="text-sm text-[#6E5C50]">{error || '该固定链接对应的角色不存在或已被清理。'}</p>
+          <h1 className="font-editorial text-xl font-semibold text-[#382A22]">未找到该角色档案</h1>
+          <p className="text-sm text-[#6E5C50]">
+            {error || '该固定链接对应的角色不存在或已被清理。'}
+          </p>
           <Link to="/" className="inline-flex items-center gap-1.5 text-sm font-medium btn-icon-ghost">
             <ArrowLeft className="w-4 h-4" />
             <span>返回展馆</span>
@@ -84,13 +157,50 @@ export function DollProfilePage() {
     );
   }
 
-  const browserFixedUrl = `${window.location.origin}/d/${doll.id}`;
   const downloadHref = doll.avatarUrl.startsWith('/api/assets/generated/')
     ? `${doll.avatarUrl}?download=1`
     : doll.avatarUrl;
 
   return (
     <div className="max-w-[1120px] mx-auto px-3.5 sm:px-8 py-3 sm:py-6 space-y-3.5 sm:space-y-5">
+      {/* NFC Bump Wake-Up Watercolor Ripple Ceremony Banner */}
+      {isNfcEntry && (
+        <motion.div
+          initial={{ opacity: 0, y: -8, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: 0.45, ease: EASE_STUDIO }}
+          className="relative overflow-hidden rounded-[20px] border border-[#B8DBD0] bg-gradient-to-r from-[#ECF7F3] via-[#FAF7F2] to-[#F7EFE2] px-4 py-3 flex items-center justify-between gap-3 shadow-[0_8px_24px_-12px_rgba(74,130,118,0.3)]"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#4A8276]/15 text-[#356B5F]">
+              <motion.span
+                animate={{ scale: [1, 1.55, 1], opacity: [0.55, 0, 0.55] }}
+                transition={{ duration: 2.2, repeat: Infinity, ease: 'easeInOut' }}
+                className="absolute inset-0 rounded-full border border-[#4A8276]/50"
+              />
+              <Radio className="w-4 h-4 relative z-10" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-[#2B5D52]">
+                碰一碰感应成功 · 已唤醒「{doll.name}」
+              </div>
+              <p className="text-[11px] text-[#6E5C50] truncate">
+                {memories.length > 0
+                  ? `已自动续接 ${memories.length} 条专属记忆，点击下方马上续聊`
+                  : '欢迎初次碰面，进入对话即可开启专属回忆录'}
+              </p>
+            </div>
+          </div>
+          <Link
+            to={`/d/${doll.id}/chat`}
+            onClick={() => haptic('medium')}
+            className="px-3.5 py-1.5 text-xs font-medium btn-capsule-primary whitespace-nowrap shrink-0"
+          >
+            立刻续聊
+          </Link>
+        </motion.div>
+      )}
+
       {/* Desktop-only Breadcrumb */}
       <div className="hidden md:flex items-center justify-between gap-4 border-b border-[#E8DFD2] pb-3">
         <Link
@@ -110,7 +220,7 @@ export function DollProfilePage() {
         {(
           [
             { key: 'overview' as const, label: '角色名片' },
-            { key: 'memory' as const, label: `记忆与凭证 (${memories.length})` },
+            { key: 'memory' as const, label: `记忆与 NFC (${memories.length})` },
           ] as const
         ).map((t) => {
           const active = mobileSection === t.key;
@@ -170,7 +280,7 @@ export function DollProfilePage() {
               </div>
             </div>
 
-            {/* Mobile merged identity + CTA right inside portrait card so everything fits in 1 screen */}
+            {/* Mobile merged identity + CTA */}
             <div className="lg:hidden p-4 border-t border-[#EFE7DB] space-y-3.5 bg-[#FFFDF9]">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -234,7 +344,7 @@ export function DollProfilePage() {
           </div>
         </motion.div>
 
-        {/* Right: Desktop Identity + Memories & NFC (Mobile shows Memories & NFC tab) */}
+        {/* Right: Desktop Identity + Memories + NFC Passport & Cross-Browser Sync */}
         <motion.div
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -247,12 +357,16 @@ export function DollProfilePage() {
           <div className="hidden lg:block studio-card rounded-[22px] p-6 space-y-5">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1.5">
-                <div className="text-xs text-[#8E7C6E] flex items-center gap-1.5">
+                <div className="text-xs text-[#8E7C6E] flex flex-wrap items-center gap-1.5">
                   <span className="font-mono font-semibold text-[#3D7267]">{doll.persona.mbti}</span>
                   <span aria-hidden="true">·</span>
                   <span>{doll.persona.name}</span>
-                  <span aria-hidden="true">·</span>
-                  <span>{doll.persona.materialHint}</span>
+                  {doll.persona.cognitiveAxis && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-mono text-[#7C6A5E]">{doll.persona.cognitiveAxis}</span>
+                    </>
+                  )}
                 </div>
                 <h1 className="font-editorial text-[32px] leading-tight font-semibold text-[#382A22]">
                   {doll.name}
@@ -316,9 +430,9 @@ export function DollProfilePage() {
             )}
           </div>
 
-          {/* Fixed Link & NFC Passport Card */}
-          <div className="studio-card atelier-passport rounded-[22px] p-4 sm:p-5 space-y-3.5">
-            <div className="flex items-center justify-between gap-2">
+          {/* Fixed Link, Web NFC Direct Write & Cross-Browser Memory Claim Passport */}
+          <div className="studio-card atelier-passport rounded-[22px] p-4 sm:p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <QrCode className="w-4 h-4 text-[#4A8276]" />
                 <div>
@@ -328,26 +442,55 @@ export function DollProfilePage() {
                   </span>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={handleCopyUrl}
-                className="inline-flex items-center gap-1.5 text-xs font-medium btn-icon-ghost whitespace-nowrap py-1"
-              >
-                <AnimatePresence mode="wait" initial={false}>
-                  <motion.span
-                    key={copied ? 'check' : 'copy'}
-                    initial={{ scale: 0.65, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0.65, opacity: 0 }}
-                    transition={{ duration: 0.14 }}
-                    className="inline-flex text-[#4A8276]"
-                  >
-                    {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                  </motion.span>
-                </AnimatePresence>
-                <span>{copied ? '已复制' : '复制链接'}</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleWriteNfcTag}
+                  disabled={writingNfc}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium btn-ink-tinted whitespace-nowrap"
+                >
+                  <Radio className={`w-3.5 h-3.5 text-[#4A8276] ${writingNfc ? 'animate-pulse' : ''}`} />
+                  <span>
+                    {writingNfc
+                      ? '请贴近标签…'
+                      : isIosDevice()
+                      ? 'iPhone 写签助手'
+                      : '写入 NFC 标签'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCopyUrl}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium btn-icon-ghost whitespace-nowrap py-1"
+                >
+                  <AnimatePresence mode="wait" initial={false}>
+                    <motion.span
+                      key={copied ? 'check' : 'copy'}
+                      initial={{ scale: 0.65, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 0.65, opacity: 0 }}
+                      transition={{ duration: 0.14 }}
+                      className="inline-flex text-[#4A8276]"
+                    >
+                      {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    </motion.span>
+                  </AnimatePresence>
+                  <span>{copied ? '已复制' : '复制链接'}</span>
+                </button>
+              </div>
             </div>
+
+            {nfcNotice && (
+              <div
+                className={`p-2.5 rounded-xl text-[11.5px] leading-relaxed border ${
+                  nfcNotice.ok
+                    ? 'border-[#C1E0D6] bg-[#ECF7F3] text-[#2A5A4F]'
+                    : 'border-[#E5B8B0] bg-[#FDF2F0] text-[#9E3D2E]'
+                }`}
+              >
+                {nfcNotice.text}
+              </div>
+            )}
 
             <div className="flex items-center gap-3.5 p-3 rounded-2xl bg-[#FFFDF9]/85 border border-[#E7DEC9]">
               <div
@@ -357,12 +500,68 @@ export function DollProfilePage() {
               />
               <div className="min-w-0 flex-1 space-y-1.5">
                 <div className="text-[11px] font-mono text-[#382A22] bg-[#FAF6F0] border border-[#E6DDD0] px-2.5 py-1.5 rounded-lg break-all line-clamp-2">
-                  {browserFixedUrl}
+                  {resolvedShareUrl}
                 </div>
                 <p className="text-[11px] text-[#8E7C6E] leading-snug">
-                  关闭重开可通过此固定入口续聊记忆，不同会话彼此隔离。
+                  {isWebNfcSupported()
+                    ? '当前支持 Android Web NFC，可直接写入 NTAG213/215；写完后 iPhone（XS 及以上）与安卓手机均可碰一碰直达唤醒。'
+                    : isIosDevice()
+                    ? 'iPhone 亮屏顶部贴近已写好标签即可原生弹窗唤醒，无需任何 App；如需用 iPhone 写签，点上方「iPhone 写签助手」复制后用免费 App「NFC Tools」写入。'
+                    : 'iPhone（XS 及以上亮屏顶部贴近）与安卓手机碰一碰标签或扫码均可直达续聊。'}
                 </p>
+                {!isIphoneBackgroundReadCompatible(resolvedShareUrl) && (
+                  <p className="text-[10.5px] text-[#B86A2E] leading-snug">
+                    提示：当前链接不是公网 HTTPS，请先在控制台「NFC 工坊」配置公网 HTTPS 域名后再写入贴纸，iPhone 才能碰一碰原生弹窗。
+                  </p>
+                )}
               </div>
+            </div>
+
+            {/* Cross-Browser / Repeat-NFC-Tap 6-Char Claim Code */}
+            <div className="pt-3 border-t border-[#EAE0D1] space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-xs font-medium text-[#382A22]">
+                  <KeyRound className="w-3.5 h-3.5 text-[#C9963B]" />
+                  <span>跨浏览器续聊口令（微信 / Safari 记忆同步）</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleGenerateClaimCode}
+                  disabled={claimBusy}
+                  className="text-xs font-medium text-[#4A8276] hover:underline whitespace-nowrap"
+                >
+                  {claimCode ? '重新生成口令' : '生成 6 位记忆口令'}
+                </button>
+              </div>
+
+              {claimCode && (
+                <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#FAF4E8] border border-[#E7D4B1]">
+                  <span className="text-xs text-[#6E5C50]">我的同步口令：</span>
+                  <span className="font-mono text-base font-bold tracking-[0.22em] text-[#382A22]">
+                    {claimCode}
+                  </span>
+                </div>
+              )}
+
+              <form onSubmit={handleClaimSession} className="flex items-center gap-2">
+                <input
+                  type="text"
+                  maxLength={6}
+                  value={claimInput}
+                  onChange={(e) => setClaimInput(e.target.value.toUpperCase())}
+                  placeholder="换设备/浏览器后输入 6 位口令同步记忆"
+                  className="flex-1 min-w-0 px-3 py-1.5 text-[14px] sm:text-xs font-mono tracking-wider uppercase bg-[#FAF7F2] border border-[#E4DBCE] rounded-xl focus:outline-none focus:bg-white focus:border-[#4A8276]"
+                />
+                <button
+                  type="submit"
+                  disabled={claimBusy || claimInput.trim().length < 6}
+                  className="px-3.5 py-1.5 text-xs font-medium btn-paper-soft disabled:opacity-45 whitespace-nowrap"
+                >
+                  同步续聊
+                </button>
+              </form>
+
+              {claimStatus && <p className="text-[11px] text-[#6E5C50]">{claimStatus}</p>}
             </div>
           </div>
         </motion.div>

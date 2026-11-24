@@ -1,3 +1,13 @@
+export type MaterialCategory =
+  | 'nut_body'
+  | 'yarn_hair'
+  | 'fabric_outfit'
+  | 'hardware_charm'
+  | 'dried_botanical';
+
+export type ImageModelTier = 'fast' | 'hd';
+export type ProviderMode = 'mock' | 'cloud';
+
 export interface SessionInfo {
   sessionId: string;
   isDemo: boolean;
@@ -8,8 +18,13 @@ export interface PersonaPublic {
   id: string;
   name: string;
   mbti: string;
+  mbtiGroup?: 'NF' | 'NT' | 'SJ' | 'SP' | string;
+  cognitiveAxis?: string;
   tagline: string;
   materialHint: string;
+  speechStyle?: string;
+  visualTrait?: string;
+  recommendedMaterials?: string[];
   openingLine: string;
   featured?: boolean;
 }
@@ -17,7 +32,105 @@ export interface PersonaPublic {
 export interface AccessoryOption {
   id: string;
   label: string;
+  category?: MaterialCategory;
+  categoryLabel?: string;
   material: string;
+  visualHint?: string;
+  inStock?: boolean;
+}
+
+export interface MaterialRecord {
+  id: string;
+  label: string;
+  category: MaterialCategory;
+  material: string;
+  visualHint: string;
+  inStock: boolean;
+  sortOrder: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface MbtiQuizAnswers {
+  energy?: 'E' | 'I';
+  perception?: 'S' | 'N';
+  judgment?: 'T' | 'F';
+  lifestyle?: 'J' | 'P';
+}
+
+export interface MbtiRecommendation {
+  primaryMbti: string;
+  primaryPersonaId: string;
+  alternateMbtis: string[];
+  keywords: string[];
+  reason: string;
+  suggestedMaterialIds: string[];
+  source: 'cloud_vision' | 'cloud_quiz' | 'quiz_rule';
+}
+
+export type CognitiveFunction = 'Ni' | 'Ne' | 'Si' | 'Se' | 'Ti' | 'Te' | 'Fi' | 'Fe';
+
+export type CognitiveFunctionScores = Record<CognitiveFunction, number>;
+
+export interface MbtiAxisPercentages {
+  E: number;
+  N: number;
+  F: number;
+  P: number;
+}
+
+export interface MbtiGuideOption {
+  id: string;
+  label: string;
+  weights: Partial<CognitiveFunctionScores>;
+}
+
+export interface MbtiGuideQuestion {
+  id: string;
+  round: number;
+  phaseLabel: string;
+  targetAxes: string;
+  reaction?: string;
+  prompt: string;
+  options: MbtiGuideOption[];
+}
+
+export interface MbtiGuideHistoryItem {
+  questionId: string;
+  questionPrompt: string;
+  userAnswer: string;
+  selectedOptionId?: string;
+  optionWeights?: Partial<CognitiveFunctionScores>;
+}
+
+export interface MbtiGuideReport {
+  primaryMbti: string;
+  primaryPersonaId: string;
+  personaName: string;
+  confidence: number;
+  dominantStack: [CognitiveFunction, CognitiveFunction, CognitiveFunction, CognitiveFunction];
+  stackSummary: string;
+  functionScores: CognitiveFunctionScores;
+  axisPercentages: MbtiAxisPercentages;
+  alternateMbtis: Array<{ mbti: string; probability: number; personaName: string }>;
+  keywords: string[];
+  evidenceSummary: string;
+  disambiguationNote: string;
+  suggestedMaterialIds: string[];
+}
+
+export interface MbtiGuideTurnResponse {
+  status: 'questioning' | 'completed';
+  engine: 'gemini_adaptive' | 'cat_local';
+  round: number;
+  maxRounds: number;
+  confidence: number;
+  topCandidates: Array<{ mbti: string; probability: number }>;
+  rawScores: CognitiveFunctionScores;
+  normalizedScores: CognitiveFunctionScores;
+  axisPercentages: MbtiAxisPercentages;
+  nextQuestion?: MbtiGuideQuestion;
+  report?: MbtiGuideReport;
 }
 
 export interface FallbackTemplate {
@@ -36,6 +149,8 @@ export interface DollSummary {
   cardId: string | null;
   cardVersionId: string | null;
   dollUrl: string;
+  nfcUrl?: string;
+  nfcAlias?: string | null;
   createdAt: string;
   persona: PersonaPublic;
 }
@@ -150,25 +265,57 @@ export interface OutputJob {
   finishedAt: string | null;
 }
 
+export interface RuntimeSettings {
+  nfcPublicBaseUrl: string;
+  effectiveBaseUrl: string;
+  imageModelTier: ImageModelTier;
+  imageModelTierLabel: string;
+  imageModel: string;
+  chatProviderMode: ProviderMode;
+  imageProviderMode: ProviderMode;
+  strictMaterialConstraint: boolean;
+  availableImageModels?: Record<ImageModelTier, string>;
+}
+
+export interface NfcTagItem {
+  alias: string;
+  dollId: string;
+  label: string;
+  dollName: string;
+  dollKind: string;
+  personaMbti: string;
+  personaName: string;
+  nfcUrl: string;
+  directUrl: string;
+  lastWrittenAt: string | null;
+  createdAt: string;
+}
+
 export interface DemoStatusPayload {
+  settings: RuntimeSettings;
   providers: {
     chat: {
-      mode: 'mock' | 'cloud';
+      mode: ProviderMode;
       model: string;
       configured: boolean;
+      cloudKeyAvailable?: boolean;
       viaOpenAICompatible: boolean;
       firstTokenTimeoutMs: number;
       firstTokenTargetMs: number;
       contextMaxMessages: number;
     };
     image: {
-      mode: 'mock' | 'cloud';
+      mode: ProviderMode;
       model: string;
+      tier?: ImageModelTier;
+      tierLabel?: string;
       configured: boolean;
+      cloudKeyAvailable?: boolean;
       viaOpenAICompatible: boolean;
       timeoutMs: number;
       performanceTargetMs: number;
       maxRegenerations: number;
+      strictMaterialConstraint?: boolean;
     };
     output: {
       mode: string;
@@ -180,7 +327,18 @@ export interface DemoStatusPayload {
     personalDolls: number;
     cards: number;
     personas: number;
+    materialsTotal?: number;
+    materialsInStock?: number;
   };
+  nfcTags: NfcTagItem[];
+  dollsForNfc: Array<{
+    id: string;
+    name: string;
+    kind: string;
+    personaMbti: string;
+    personaName: string;
+    directUrl: string;
+  }>;
   metrics: {
     chat: Array<{
       provider: string;

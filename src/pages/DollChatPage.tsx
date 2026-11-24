@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Send,
   Trash2,
+  WifiOff,
 } from 'lucide-react';
 import { api, generateIdempotencyKey, streamDollChat } from '../lib/api';
 import type { ChatMessage, DollDetail, MemoryItem } from '../lib/types';
@@ -71,6 +72,9 @@ export function DollChatPage() {
   const [mobileTab, setMobileTab] = useState<'chat' | 'memory'>('chat');
 
   const [copied, setCopied] = useState(false);
+  const [isOffline, setIsOffline] = useState(() =>
+    typeof navigator !== 'undefined' ? !navigator.onLine : false
+  );
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [autoVoice, setAutoVoice] = useState(false);
   const [paperTexture, setPaperTexture] = useState<ChatPaperTextureId>(() => loadChatPaperTexture());
@@ -85,6 +89,17 @@ export function DollChatPage() {
     handleCanvasClick: handleBlankCanvasClick,
     dismissBubble: dismissMemoryBubble,
   } = useChatMemoryBubbles(messages, memories, doll);
+
+  useEffect(() => {
+    const onOnline = () => setIsOffline(false);
+    const onOffline = () => setIsOffline(true);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
 
   useEffect(() => {
     autoVoiceRef.current = autoVoice;
@@ -105,6 +120,8 @@ export function DollChatPage() {
     saveChatDayPhaseMode(next);
   };
 
+  const cacheKey = `nutshell_chat_snapshot_${dollId}`;
+
   const loadData = async () => {
     setLoading(true);
     setPageError(null);
@@ -118,7 +135,36 @@ export function DollChatPage() {
       setDoll(d);
       setMessages(msgRes.items);
       setMemories(mems);
+      try {
+        localStorage.setItem(
+          cacheKey,
+          JSON.stringify({ doll: d, messages: msgRes.items.slice(-20), memories: mems })
+        );
+      } catch {
+        // Ignore storage quota issues
+      }
     } catch (err) {
+      // Offline graceful degradation: restore cached doll & recent messages if available
+      try {
+        const cachedRaw = localStorage.getItem(cacheKey);
+        if (cachedRaw) {
+          const cached = JSON.parse(cachedRaw) as {
+            doll?: DollDetail;
+            messages?: ChatMessage[];
+            memories?: MemoryItem[];
+          };
+          if (cached.doll) {
+            setDoll(cached.doll);
+            setMessages(cached.messages ?? []);
+            setMemories(cached.memories ?? []);
+            setIsOffline(true);
+            setLoading(false);
+            return;
+          }
+        }
+      } catch {
+        // Ignore parse failure
+      }
       setPageError(err instanceof Error ? err.message : '加载对话空间失败');
     } finally {
       setLoading(false);
@@ -649,6 +695,23 @@ export function DollChatPage() {
               )}
             </div>
           </div>
+
+          {/* Warm Offline Fallback Banner */}
+          {isOffline && (
+            <div className="relative z-20 mx-3.5 sm:mx-5 mt-2.5 px-3.5 py-2 rounded-xl border border-[#E7D4B1] bg-[#FAF4E8] text-xs text-[#7A5622] flex items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1.5">
+                <WifiOff className="w-3.5 h-3.5 shrink-0" />
+                <span>娃娃睡着了，连上网它就醒（当前可继续翻看已加载的对话与记忆）</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => void loadData()}
+                className="font-medium underline underline-offset-2 whitespace-nowrap shrink-0"
+              >
+                重试连接
+              </button>
+            </div>
+          )}
 
           {/* Top Memory Snapshot — Shared Keywords & Expandable Key Dialogue Memoir */}
           <div className={mobileTab === 'memory' ? 'hidden lg:block' : 'block'}>

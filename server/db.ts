@@ -1,8 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { config } from './config.ts';
-import { DEMO_DOLL_SEEDS, PERSONA_SEEDS } from './data/seed.ts';
+import {
+  config,
+  IMAGE_MODEL_BY_TIER,
+  type ImageModelTier,
+  type ProviderMode,
+} from './config.ts';
+import {
+  DEFAULT_MATERIAL_SEEDS,
+  DEMO_DOLL_SEEDS,
+  PERSONA_SEEDS,
+  type MaterialCategory,
+} from './data/seed.ts';
 
 // Ensure data & storage directories exist
 fs.mkdirSync(path.dirname(config.databaseUrl), { recursive: true });
@@ -14,12 +24,41 @@ export const db = new Database(config.databaseUrl);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+export interface MaterialRecord {
+  id: string;
+  label: string;
+  category: MaterialCategory;
+  material: string;
+  visualHint: string;
+  inStock: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RuntimeSettings {
+  nfcPublicBaseUrl: string;
+  imageModelTier: ImageModelTier;
+  imageModel: string;
+  chatProviderMode: ProviderMode;
+  imageProviderMode: ProviderMode;
+  strictMaterialConstraint: boolean;
+}
+
+function ensureColumnExists(table: string, column: string, definition: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
 export function initDatabase(): { recoveredRunningVersions: number; recoveredRunningJobs: number } {
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       is_demo INTEGER NOT NULL DEFAULT 1,
       invalidated INTEGER NOT NULL DEFAULT 0,
+      visitor_key TEXT,
       created_at TEXT NOT NULL,
       expires_at TEXT NOT NULL
     );
@@ -28,11 +67,49 @@ export function initDatabase(): { recoveredRunningVersions: number; recoveredRun
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       mbti TEXT NOT NULL,
+      mbti_group TEXT NOT NULL DEFAULT 'NF',
+      cognitive_axis TEXT NOT NULL DEFAULT '',
       tagline TEXT NOT NULL,
       material_hint TEXT NOT NULL,
+      speech_style TEXT NOT NULL DEFAULT '',
+      visual_trait TEXT NOT NULL DEFAULT '',
+      recommended_materials TEXT NOT NULL DEFAULT '[]',
       prompt TEXT NOT NULL,
       opening_line TEXT NOT NULL,
       featured INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS materials (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'hardware_charm',
+      material TEXT NOT NULL,
+      visual_hint TEXT NOT NULL,
+      in_stock INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS system_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS nfc_tags (
+      alias TEXT PRIMARY KEY,
+      doll_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      last_written_at TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS session_claim_codes (
+      code TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS dolls (
@@ -167,15 +244,40 @@ export function initDatabase(): { recoveredRunningVersions: number; recoveredRun
     );
   `);
 
+  // Safe idempotent schema migrations for pre-existing SQLite databases
+  ensureColumnExists('sessions', 'visitor_key', 'TEXT');
+  ensureColumnExists('personas', 'mbti_group', "TEXT NOT NULL DEFAULT 'NF'");
+  ensureColumnExists('personas', 'cognitive_axis', "TEXT NOT NULL DEFAULT ''");
+  ensureColumnExists('personas', 'speech_style', "TEXT NOT NULL DEFAULT ''");
+  ensureColumnExists('personas', 'visual_trait', "TEXT NOT NULL DEFAULT ''");
+  ensureColumnExists('personas', 'recommended_materials', "TEXT NOT NULL DEFAULT '[]'");
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_sessions_visitor_key
+      ON sessions(visitor_key)
+      WHERE visitor_key IS NOT NULL;
+  `);
+
   // Seed 16 MBTI personas
   const upsertPersona = db.prepare(`
-    INSERT INTO personas (id, name, mbti, tagline, material_hint, prompt, opening_line, featured)
-    VALUES (@id, @name, @mbti, @tagline, @materialHint, @prompt, @openingLine, @featured)
+    INSERT INTO personas (
+      id, name, mbti, mbti_group, cognitive_axis, tagline, material_hint,
+      speech_style, visual_trait, recommended_materials, prompt, opening_line, featured
+    )
+    VALUES (
+      @id, @name, @mbti, @mbtiGroup, @cognitiveAxis, @tagline, @materialHint,
+      @speechStyle, @visualTrait, @recommendedMaterialsJson, @prompt, @openingLine, @featured
+    )
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       mbti = excluded.mbti,
+      mbti_group = excluded.mbti_group,
+      cognitive_axis = excluded.cognitive_axis,
       tagline = excluded.tagline,
       material_hint = excluded.material_hint,
+      speech_style = excluded.speech_style,
+      visual_trait = excluded.visual_trait,
+      recommended_materials = excluded.recommended_materials,
       prompt = excluded.prompt,
       opening_line = excluded.opening_line,
       featured = excluded.featured
@@ -191,19 +293,44 @@ export function initDatabase(): { recoveredRunningVersions: number; recoveredRun
     WHERE dolls.kind = 'demo'
   `);
 
+  const insertNfcTag = db.prepare(`
+    INSERT OR IGNORE INTO nfc_tags (alias, doll_id, label, last_written_at, created_at)
+    VALUES (?, ?, ?, NULL, ?)
+  `);
+
   const now = new Date().toISOString();
   const seedTx = db.transaction(() => {
     for (const persona of PERSONA_SEEDS) {
-      upsertPersona.run(persona);
+      upsertPersona.run({
+        ...persona,
+        recommendedMaterialsJson: JSON.stringify(persona.recommendedMaterials),
+      });
     }
     for (const doll of DEMO_DOLL_SEEDS) {
       upsertDemoDoll.run({ ...doll, createdAt: now });
+      insertNfcTag.run(doll.nfcAlias, doll.id, `${doll.name} · NFC 展位主签`, now);
+    }
+
+    // Seed default materials only when materials table is empty (preserve team edits/imports!)
+    const matCount = (db.prepare(`SELECT COUNT(*) AS c FROM materials`).get() as { c: number }).c;
+    if (matCount === 0) {
+      const insertMat = db.prepare(`
+        INSERT OR IGNORE INTO materials (id, label, category, material, visual_hint, in_stock, sort_order, created_at, updated_at)
+        VALUES (@id, @label, @category, @material, @visualHint, @inStock, @sortOrder, @createdAt, @updatedAt)
+      `);
+      for (const m of DEFAULT_MATERIAL_SEEDS) {
+        insertMat.run({
+          ...m,
+          inStock: m.inStock ? 1 : 0,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
     }
   });
   seedTx();
 
-  // Startup recovery (Section 6.4):
-  // Unknown running tasks transition to failed with WORKER_RESTARTED; never auto-re-bill.
+  // Startup recovery: Unknown running tasks transition to failed with WORKER_RESTARTED
   const recoveredVersions = db
     .prepare(
       `UPDATE card_versions
@@ -237,6 +364,76 @@ export function initDatabase(): { recoveredRunningVersions: number; recoveredRun
     recoveredRunningVersions: recoveredVersions.changes,
     recoveredRunningJobs: recoveredJobs.changes,
   };
+}
+
+export function getRuntimeSettings(): RuntimeSettings {
+  const rows = db
+    .prepare(`SELECT key, value FROM system_settings`)
+    .all() as Array<{ key: string; value: string }>;
+  const map = new Map(rows.map((r) => [r.key, r.value]));
+
+  const tierRaw = map.get('image_model_tier');
+  const imageModelTier: ImageModelTier = tierRaw === 'hd' ? 'hd' : 'fast';
+
+  const chatModeRaw = map.get('chat_provider_mode');
+  const chatProviderMode: ProviderMode =
+    chatModeRaw === 'cloud' || chatModeRaw === 'mock' ? chatModeRaw : config.chatProvider;
+
+  const imageModeRaw = map.get('image_provider_mode');
+  const imageProviderMode: ProviderMode =
+    imageModeRaw === 'cloud' || imageModeRaw === 'mock' ? imageModeRaw : config.imageProvider;
+
+  const strictRaw = map.get('strict_material_constraint');
+  const strictMaterialConstraint = strictRaw === undefined ? true : strictRaw !== 'false';
+
+  return {
+    nfcPublicBaseUrl: map.get('nfc_public_base_url') ?? '',
+    imageModelTier,
+    imageModel: IMAGE_MODEL_BY_TIER[imageModelTier],
+    chatProviderMode,
+    imageProviderMode,
+    strictMaterialConstraint,
+  };
+}
+
+export function setRuntimeSetting(key: string, value: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO system_settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).run(key, value, now);
+}
+
+export function listMaterials(onlyInStock = false): MaterialRecord[] {
+  const rows = (onlyInStock
+    ? db
+        .prepare(
+          `SELECT * FROM materials WHERE in_stock = 1 ORDER BY sort_order ASC, created_at ASC`
+        )
+        .all()
+    : db
+        .prepare(`SELECT * FROM materials ORDER BY sort_order ASC, created_at ASC`)
+        .all()) as Array<Record<string, unknown>>;
+
+  return rows.map((r) => ({
+    id: String(r.id),
+    label: String(r.label),
+    category: String(r.category) as MaterialCategory,
+    material: String(r.material),
+    visualHint: String(r.visual_hint),
+    inStock: Number(r.in_stock) === 1,
+    sortOrder: Number(r.sort_order || 0),
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  }));
+}
+
+export function getMaterialsByIds(ids: string[]): MaterialRecord[] {
+  if (!ids || ids.length === 0) return [];
+  const all = listMaterials(false);
+  const byId = new Map(all.map((m) => [m.id, m]));
+  return ids.map((id) => byId.get(id)).filter((v): v is MaterialRecord => Boolean(v));
 }
 
 export function recordRunLog(entry: {

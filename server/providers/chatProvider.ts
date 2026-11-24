@@ -5,6 +5,9 @@ export interface ChatPersonaContext {
   id: string;
   name: string;
   mbti: string;
+  cognitiveAxis?: string;
+  speechStyle?: string;
+  materialHint?: string;
   prompt: string;
   openingLine: string;
 }
@@ -45,7 +48,7 @@ const MEMORY_TYPE_LABELS: Record<string, string> = {
   user_nickname: '用户称呼',
   doll_name: '娃娃名字',
   persona: '选定人格',
-  accessories: '选定配饰',
+  accessories: '选定手作材料与配饰',
   fact: '用户明确要求记住的事',
 };
 
@@ -58,19 +61,28 @@ export function buildSystemPrompt(input: ChatStreamInput): string {
       : '- 暂无已保存的明确记忆';
 
   return [
-    `你是“果壳碰碰”项目里的天然果实手作娃娃，你的名字是「${input.dollName}」。`,
-    `你的人格设定是 ${input.persona.mbti}（${input.persona.name}）。`,
-    `人格表达要求：${input.persona.prompt}`,
+    `你是“果壳碰碰”文创工坊里的天然果实手作娃娃，你的名字是「${input.dollName}」。`,
+    `你的核心 MBTI 人格是 ${input.persona.mbti}（${input.persona.name}）。`,
+    input.persona.cognitiveAxis ? `认知功能轴：${input.persona.cognitiveAxis}。` : '',
+    input.persona.materialHint ? `你的实体手作材质设定：${input.persona.materialHint}。` : '',
     '',
-    '【已保存的明确记忆（仅来自用户实际输入或创建选择，请自然使用，不要生硬背诵清单）】',
+    '【人格内核与强烈辨识度约束（必须严格遵守，禁止退化为泛化温吞客服腔）】',
+    `核心人格指引：${input.persona.prompt}`,
+    input.persona.speechStyle ? `语言风格、口癖与禁忌：${input.persona.speechStyle}` : '',
+    `你的经典开场语气参考：「${input.persona.openingLine}」`,
+    '',
+    '【已保存的明确记忆（仅来自用户实际输入或创建选择，请自然融入对话，不要生硬背诵清单）】',
     memoryLines,
     '',
-    '【对话准则】',
-    '1. 始终保持「' + input.dollName + '」的身份与 ' + input.persona.mbti + ' 表达风格，不得擅自更改自己的人格设定。',
-    '2. 如果记忆中有用户称呼，请自然地称呼对方；如果对方提及创建时选过的配饰、人格或让你记住的事，请基于上述记忆准确回应。',
-    '3. 不把未告知的情绪或事实编造为“既定记忆”。',
-    '4. 使用简洁自然的中文回复，长度控制在 2–4 句左右，富有手作温度。',
-  ].join('\n');
+    '【对话硬规则】',
+    `1. 每一轮回复都必须鲜明体现 ${input.persona.mbti}（${input.persona.name}）的思维方式、句式节奏与情感温度，让用户一眼就能听出你与其他 15 种 MBTI 娃娃的明显差别。`,
+    '2. 禁止自称“AI”“语言模型”或使用机械客服话术（如“有什么我可以帮您”）。你就是一只住进对方桌面/书包、通过 NFC 碰一碰苏醒的天然果实小娃娃。',
+    '3. 如果记忆中有用户称呼，请自然称呼对方；若对方聊到你身上的果实/毛线/配饰或让你记住的事，基于上述记忆真诚呼应。',
+    '4. 绝不把未告知的事实编造为“既定记忆”。',
+    '5. 中文回复自然紧凑，长度控制在 2–4 句，既有鲜明 MBTI 性格锐度又有手作陪伴温度。',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function trimHistory(history: ChatHistoryMessage[], maxMessages: number): ChatHistoryMessage[] {
@@ -94,13 +106,11 @@ class CloudChatProvider implements ChatProvider {
     const systemInstruction = buildSystemPrompt(input);
     const trimmedHistory = trimHistory(input.history, config.chatContextMaxMessages);
 
-    // Branch A: OpenAI-compatible Chat Completions SSE if CHAT_API_BASE is explicitly configured
     if (config.chatApiBase) {
       yield* this.streamOpenAICompatible(systemInstruction, trimmedHistory, input);
       return;
     }
 
-    // Branch B: Official @google/genai SDK (server-side only)
     yield* this.streamGemini(systemInstruction, trimmedHistory, input);
   }
 
@@ -208,11 +218,12 @@ class CloudChatProvider implements ChatProvider {
         return;
       }
       const rawMsg = errObj?.message || '云端对话服务调用失败';
-      const friendlyMsg = rawMsg.includes('503') || rawMsg.includes('UNAVAILABLE')
-        ? '云端对话模型当前处于高负载高峰（HTTP 503），请稍后点击重试'
-        : rawMsg.includes('429') || rawMsg.includes('RESOURCE_EXHAUSTED')
-        ? '云端对话模型触发配额限流（HTTP 429），请稍后重试'
-        : rawMsg.slice(0, 220);
+      const friendlyMsg =
+        rawMsg.includes('503') || rawMsg.includes('UNAVAILABLE')
+          ? '云端对话模型当前处于高负载高峰（HTTP 503），请稍后点击重试'
+          : rawMsg.includes('429') || rawMsg.includes('RESOURCE_EXHAUSTED')
+          ? '云端对话模型触发配额限流（HTTP 429），请稍后重试'
+          : rawMsg.slice(0, 220);
       yield {
         type: 'error',
         code: 'PROVIDER_ERROR',
@@ -328,7 +339,6 @@ class MockChatProvider implements ChatProvider {
   readonly mode = 'mock' as const;
 
   async *streamChat(input: ChatStreamInput): AsyncGenerator<ChatStreamEvent, void, unknown> {
-    // Allow explicit error-branch verification in mock mode
     if (input.userText.includes('[SIMULATE_TIMEOUT]')) {
       await new Promise((r) => setTimeout(r, 300));
       yield {
@@ -354,37 +364,65 @@ class MockChatProvider implements ChatProvider {
 
     const greeting = nickname ? `${nickname}，` : '';
     const personaPrefix: Record<string, string> = {
-      ENFP: `我是${input.dollName}！听你这么说我眼睛都亮了。`,
-      INTJ: `我是${input.dollName}。我把你说的重点整理了一下：`,
-      INFP: `我是${input.dollName}，听到你这么说，心里像被窗边的风轻轻拂过。`,
-      ESTP: `我是${input.dollName}，干脆直接一点！`,
+      ENFP: `等一下等一下！我是${input.dollName}，听你这么说我脑子里已经蹦出三个超好玩的点子啦！`,
+      INTJ: `先看本质。我是${input.dollName}，我把你刚才说的关键变量拆成了两层：`,
+      INFP: `嗯……我是${input.dollName}，你刚才那句话让我心里轻轻晃了一下，像落了一片安静的叶子。`,
+      ESTP: `行，直接开整！我是${input.dollName}，别绕弯子，咱们马上就能试出结果。`,
+      INFJ: `我听见你话里藏着的那一层情绪了。我是${input.dollName}，我们可以慢慢理清它。`,
+      ENFJ: `我真开心你愿意跟我说这些！我是${input.dollName}，而且你身上那股认真劲儿真的很让人信赖。`,
+      INTP: `有意思，这刚好戳中一个反直觉的机制。我是${input.dollName}，按逻辑推演的话：`,
+      ENTP: `等等，如果把你刚才那个前提反过来想，会不会更有意思？我是${input.dollName}，咱们来碰个脑洞！`,
+      ENTJ: `目标很明确。我是${input.dollName}，给你一个 1-2-3 推进方案，立刻能落地：`,
+      ISTJ: `我记下来了，按步骤核对一遍最稳妥。我是${input.dollName}，先把确定的事项放好：`,
+      ISFJ: `先喝口温水歇一歇，我一直都在呢。我是${input.dollName}，你说的细节我都会仔细收着。`,
+      ESTJ: `收到，干脆按标准拆开办！我是${input.dollName}，今天把最核心的那一步先完成。`,
+      ESFJ: `哎呀我最懂这种心情了！我是${input.dollName}，来来来，跟我说说大家都怎么反应的？`,
+      ISTP: `懂了，少说虚的直接看怎么修。我是${input.dollName}，最省力的一招是：`,
+      ISFP: `唔，这个画面感我很喜欢……我是${input.dollName}，像午后晒热了的棉布一样舒服。`,
+      ESFP: `哇塞这个必须庆祝一下！我是${input.dollName}，快乐就是要趁热分享才对味！`,
     };
-    const opening = personaPrefix[input.persona.mbti] || `我是${input.dollName}（${input.persona.mbti} · ${input.persona.name}）。`;
+    const opening =
+      personaPrefix[input.persona.mbti] ||
+      `我是${input.dollName}（${input.persona.mbti} · ${input.persona.name}）。`;
 
     const parts: string[] = [greeting + opening];
 
-    if (accessories && (input.userText.includes('配饰') || input.userText.includes('搭配') || input.userText.includes('记得') || input.history.length === 0)) {
+    if (
+      accessories &&
+      (input.userText.includes('配饰') ||
+        input.userText.includes('材料') ||
+        input.userText.includes('搭配') ||
+        input.userText.includes('记得') ||
+        input.history.length === 0)
+    ) {
       parts.push(`我一直好好戴着你当初为我挑的「${accessories}」，每次碰一碰都觉得很合拍。`);
     }
 
-    if (facts.length > 0 && (input.userText.includes('记得') || input.userText.includes('记住') || input.userText.includes('什么') || input.history.length <= 2)) {
+    if (
+      facts.length > 0 &&
+      (input.userText.includes('记得') ||
+        input.userText.includes('记住') ||
+        input.userText.includes('什么') ||
+        input.history.length <= 2)
+    ) {
       parts.push(`另外，我一直记着你特意交代过的事：「${facts[facts.length - 1]}」。`);
     } else if (input.userText.includes('我是谁') || input.userText.includes('叫什么')) {
       if (nickname) {
         parts.push(`我当然记得你叫${nickname}，我的名字是${input.dollName}，性格是 ${input.persona.mbti}。`);
       } else {
-        parts.push(`你还没告诉我怎么称呼你呢，在右侧记忆栏或者对话里告诉我，我就记住啦。`);
+        parts.push(`你还没告诉我怎么称呼你呢，在记忆面板或者对话里告诉我，我就记住啦。`);
       }
     } else {
-      parts.push(`关于你刚提到的“${input.userText.slice(0, 28)}${input.userText.length > 28 ? '…' : ''}”，以我 ${input.persona.name} 的眼光来看，这件事很值得再往下聊聊。`);
+      parts.push(
+        `关于你刚提到的“${input.userText.slice(0, 28)}${input.userText.length > 28 ? '…' : ''}”，以我 ${input.persona.name} 的视角来看，接下来很值得继续聊聊。`
+      );
     }
 
     const fullText = parts.join('');
-    // Stream in small natural Chinese chunks
     const chunkSize = 4;
     for (let i = 0; i < fullText.length; i += chunkSize) {
       if (input.signal?.aborted) return;
-      await new Promise((r) => setTimeout(r, 38));
+      await new Promise((r) => setTimeout(r, 34));
       yield { type: 'delta', text: fullText.slice(i, i + chunkSize) };
     }
 

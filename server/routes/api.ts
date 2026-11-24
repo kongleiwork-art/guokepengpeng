@@ -7,26 +7,46 @@ import QRCode from 'qrcode';
 import {
   buildPublicBaseUrl,
   config,
+  IMAGE_MODEL_BY_TIER,
+  IMAGE_TIER_LABELS,
   isChatCloudConfigured,
   isImageCloudConfigured,
+  validatePublicBaseUrl,
+  type ImageModelTier,
+  type ProviderMode,
 } from '../config.ts';
 import {
-  ACCESSORY_OPTIONS,
   FALLBACK_TEMPLATES,
-  getAccessoryLabels,
+  MATERIAL_CATEGORY_LABELS,
+  type MaterialCategory,
 } from '../data/seed.ts';
-import { db, recordRunLog } from '../db.ts';
+import {
+  db,
+  getMaterialsByIds,
+  getRuntimeSettings,
+  listMaterials,
+  recordRunLog,
+  setRuntimeSetting,
+} from '../db.ts';
 import {
   clearSessionCookie,
   createNewSession,
   ensureSession,
+  extractVisitorKey,
   loadExistingSession,
+  loadSessionById,
   requireAdmin,
   sendError,
   sendSuccess,
   setSessionCookie,
 } from '../middleware/session.ts';
 import { getChatProvider } from '../providers/chatProvider.ts';
+import { recommendMbti, type MbtiQuizAnswers } from '../providers/mbtiAnalyzer.ts';
+import {
+  runMbtiGuideTurn,
+  type CognitiveFunctionScores,
+  type MbtiGuideHistoryItem,
+} from '../providers/mbtiGuideEngine.ts';
 import { validateImageBuffer } from '../utils/imageValidation.ts';
 import {
   enqueueImageVersion,
@@ -45,9 +65,27 @@ const upload = multer({
 });
 
 const inFlightChats = new Set<string>();
+const VALID_MATERIAL_CATEGORIES = new Set<MaterialCategory>([
+  'nut_body',
+  'yarn_hair',
+  'fabric_outfit',
+  'hardware_charm',
+  'dried_botanical',
+]);
 
 function hashObject(obj: unknown): string {
   return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex');
+}
+
+function getLiveBaseUrl(req: express.Request): string {
+  const settings = getRuntimeSettings();
+  return buildPublicBaseUrl(req, settings.nfcPublicBaseUrl);
+}
+
+function resolveMaterialLabels(ids: string[]): string[] {
+  const mats = getMaterialsByIds(ids);
+  if (mats.length > 0) return mats.map((m) => m.label);
+  return [];
 }
 
 function checkIdempotency(
@@ -148,7 +186,7 @@ async function generateQrSvg(url: string): Promise<string> {
 }
 
 // ============================================================
-// 1. Health & Session
+// 1. Health, Session & Cross-Browser Claim Code Sync
 // ============================================================
 router.get('/health', (_req, res) => {
   sendSuccess(res, {
@@ -158,9 +196,10 @@ router.get('/health', (_req, res) => {
 });
 
 router.post('/session', (req, res) => {
+  const visitorKey = extractVisitorKey(req);
   let session = loadExistingSession(req);
   if (!session) {
-    session = createNewSession();
+    session = createNewSession(visitorKey);
   }
   setSessionCookie(req, res, session);
   sendSuccess(res, {
@@ -170,61 +209,324 @@ router.post('/session', (req, res) => {
   });
 });
 
+function generateClaimCode(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.randomBytes(6);
+  let out = '';
+  for (let i = 0; i < 6; i++) {
+    out += alphabet[bytes[i] % alphabet.length];
+  }
+  return out;
+}
+
+router.post('/session/claim-code', ensureSession, (req, res) => {
+  const sessionId = req.session!.id;
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 24 * 3600 * 1000).toISOString();
+
+  // Clean up expired codes opportunistically
+  db.prepare(`DELETE FROM session_claim_codes WHERE expires_at < ?`).run(now.toISOString());
+
+  let code = generateClaimCode();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const exists = db.prepare(`SELECT code FROM session_claim_codes WHERE code = ?`).get(code);
+    if (!exists) break;
+    code = generateClaimCode();
+  }
+
+  db.prepare(
+    `INSERT INTO session_claim_codes (code, session_id, expires_at, created_at)
+     VALUES (?, ?, ?, ?)`
+  ).run(code, sessionId, expiresAt, now.toISOString());
+
+  sendSuccess(res, {
+    code,
+    expiresAt,
+    sessionId,
+  });
+});
+
+router.post('/session/claim', (req, res) => {
+  const rawCode = typeof req.body?.code === 'string' ? req.body.code.trim().toUpperCase() : '';
+  if (!/^[A-Z0-9]{6}$/.test(rawCode)) {
+    sendError(req, res, 400, 'INVALID_INPUT', '请输入有效的 6 位记忆口令');
+    return;
+  }
+
+  const row = db
+    .prepare(`SELECT code, session_id, expires_at FROM session_claim_codes WHERE code = ?`)
+    .get(rawCode) as { code: string; session_id: string; expires_at: string } | undefined;
+
+  if (!row || new Date(row.expires_at).getTime() <= Date.now()) {
+    sendError(req, res, 404, 'CLAIM_CODE_EXPIRED', '该记忆口令不存在或已过期，请重新生成');
+    return;
+  }
+
+  const targetSession = loadSessionById(row.session_id);
+  if (!targetSession) {
+    sendError(req, res, 404, 'NOT_FOUND', '对应记忆档案已失效');
+    return;
+  }
+
+  const visitorKey = extractVisitorKey(req);
+  if (visitorKey) {
+    db.prepare(`UPDATE sessions SET visitor_key = ? WHERE id = ?`).run(visitorKey, targetSession.id);
+    targetSession.visitorKey = visitorKey;
+  }
+  setSessionCookie(req, res, targetSession);
+
+  sendSuccess(res, {
+    sessionId: targetSession.id,
+    expiresAt: targetSession.expiresAt,
+    synced: true,
+  });
+});
+
 // ============================================================
-// 2. Personas, Accessories & Templates (public fields only)
+// 2. Personas, Materials, Templates & MBTI Analyzer
 // ============================================================
 router.get('/personas', ensureSession, (_req, res) => {
   const rows = db
     .prepare(
-      `SELECT id, name, mbti, tagline, material_hint, opening_line, featured
+      `SELECT id, name, mbti, mbti_group, cognitive_axis, tagline, material_hint,
+              speech_style, visual_trait, recommended_materials, opening_line, featured
        FROM personas
        ORDER BY featured DESC, mbti ASC`
     )
-    .all() as Array<{
-    id: string;
-    name: string;
-    mbti: string;
-    tagline: string;
-    material_hint: string;
-    opening_line: string;
-    featured: number;
-  }>;
+    .all() as Array<Record<string, unknown>>;
 
   sendSuccess(
     res,
     rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      mbti: r.mbti,
-      tagline: r.tagline,
-      materialHint: r.material_hint,
-      openingLine: r.opening_line,
-      featured: r.featured === 1,
+      id: String(r.id),
+      name: String(r.name),
+      mbti: String(r.mbti),
+      mbtiGroup: String(r.mbti_group || 'NF'),
+      cognitiveAxis: String(r.cognitive_axis || ''),
+      tagline: String(r.tagline),
+      materialHint: String(r.material_hint),
+      speechStyle: String(r.speech_style || ''),
+      visualTrait: String(r.visual_trait || ''),
+      recommendedMaterials: r.recommended_materials
+        ? (JSON.parse(String(r.recommended_materials)) as string[])
+        : [],
+      openingLine: String(r.opening_line),
+      featured: Number(r.featured) === 1,
     }))
   );
 });
 
 router.get('/accessories', ensureSession, (_req, res) => {
-  sendSuccess(res, ACCESSORY_OPTIONS);
+  const inStockMaterials = listMaterials(true);
+  sendSuccess(
+    res,
+    inStockMaterials.map((m) => ({
+      id: m.id,
+      label: m.label,
+      category: m.category,
+      categoryLabel: MATERIAL_CATEGORY_LABELS[m.category] || '手作材料',
+      material: m.material,
+      visualHint: m.visualHint,
+      inStock: m.inStock,
+    }))
+  );
+});
+
+router.get('/materials', ensureSession, (_req, res) => {
+  const inStockMaterials = listMaterials(true);
+  sendSuccess(res, {
+    categories: MATERIAL_CATEGORY_LABELS,
+    items: inStockMaterials,
+  });
 });
 
 router.get('/templates', ensureSession, (_req, res) => {
   sendSuccess(res, FALLBACK_TEMPLATES);
 });
 
+router.post('/mbti/recommend', ensureSession, (req, res) => {
+  upload.single('photo')(req, res, async (multerErr) => {
+    if (multerErr) {
+      const isSizeErr = multerErr instanceof multer.MulterError && multerErr.code === 'LIMIT_FILE_SIZE';
+      sendError(
+        req,
+        res,
+        isSizeErr ? 413 : 400,
+        isSizeErr ? 'IMAGE_TOO_LARGE' : 'INVALID_INPUT',
+        isSizeErr ? '图片体积超过限制（最大 2 MB）' : multerErr.message
+      );
+      return;
+    }
+
+    let photoBuffer: Buffer | undefined;
+    let photoMime: string | undefined;
+    if (req.file?.buffer) {
+      try {
+        const validated = validateImageBuffer(req.file.buffer);
+        photoBuffer = req.file.buffer;
+        photoMime = validated.mimeType;
+      } catch (err: unknown) {
+        const e = err as { status?: number; code?: string; message?: string };
+        sendError(req, res, e.status || 400, e.code || 'UNSUPPORTED_IMAGE', e.message || '图片校验失败');
+        return;
+      }
+    }
+
+    let quizAnswers: MbtiQuizAnswers | undefined;
+    if (typeof req.body?.quizAnswers === 'string' && req.body.quizAnswers.trim()) {
+      try {
+        const parsed = JSON.parse(req.body.quizAnswers);
+        if (parsed && typeof parsed === 'object') {
+          quizAnswers = {
+            energy: parsed.energy === 'E' || parsed.energy === 'I' ? parsed.energy : undefined,
+            perception: parsed.perception === 'S' || parsed.perception === 'N' ? parsed.perception : undefined,
+            judgment: parsed.judgment === 'T' || parsed.judgment === 'F' ? parsed.judgment : undefined,
+            lifestyle: parsed.lifestyle === 'J' || parsed.lifestyle === 'P' ? parsed.lifestyle : undefined,
+          };
+        }
+      } catch {
+        // Ignore malformed optional quiz payload
+      }
+    } else if (req.body?.quizAnswers && typeof req.body.quizAnswers === 'object') {
+      const parsed = req.body.quizAnswers;
+      quizAnswers = {
+        energy: parsed.energy === 'E' || parsed.energy === 'I' ? parsed.energy : undefined,
+        perception: parsed.perception === 'S' || parsed.perception === 'N' ? parsed.perception : undefined,
+        judgment: parsed.judgment === 'T' || parsed.judgment === 'F' ? parsed.judgment : undefined,
+        lifestyle: parsed.lifestyle === 'J' || parsed.lifestyle === 'P' ? parsed.lifestyle : undefined,
+      };
+    }
+
+    try {
+      const settings = getRuntimeSettings();
+      const inStockMaterials = listMaterials(true);
+      const result = await recommendMbti({
+        photoBuffer,
+        photoMime,
+        quizAnswers,
+        providerMode: settings.chatProviderMode,
+        inStockMaterials,
+      });
+      sendSuccess(res, result);
+    } catch (err: unknown) {
+      const e = err as { status?: number; code?: string; message?: string };
+      sendError(
+        req,
+        res,
+        e.status || 502,
+        e.code || 'PROVIDER_ERROR',
+        e.message || 'MBTI 人格推荐分析失败，请稍后重试'
+      );
+    }
+  });
+});
+
+router.post('/mbti/guide/turn', ensureSession, async (req, res) => {
+  try {
+    const rawHistory = Array.isArray(req.body?.history) ? req.body.history : [];
+    const history: MbtiGuideHistoryItem[] = rawHistory
+      .slice(0, 12)
+      .filter((item: unknown): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+      .map((item: Record<string, unknown>) => ({
+        questionId: typeof item.questionId === 'string' ? item.questionId.slice(0, 80) : 'q',
+        questionPrompt: typeof item.questionPrompt === 'string' ? item.questionPrompt.slice(0, 400) : '',
+        userAnswer: typeof item.userAnswer === 'string' ? item.userAnswer.slice(0, 600) : '',
+        selectedOptionId:
+          typeof item.selectedOptionId === 'string' ? item.selectedOptionId.slice(0, 80) : undefined,
+        optionWeights:
+          item.optionWeights && typeof item.optionWeights === 'object'
+            ? (item.optionWeights as Partial<CognitiveFunctionScores>)
+            : undefined,
+      }));
+
+    const rawScores =
+      req.body?.rawScores && typeof req.body.rawScores === 'object'
+        ? (req.body.rawScores as Partial<CognitiveFunctionScores>)
+        : undefined;
+    const maxRounds =
+      typeof req.body?.maxRounds === 'number' && Number.isFinite(req.body.maxRounds)
+        ? Math.max(4, Math.min(8, Math.round(req.body.maxRounds)))
+        : 5;
+    const forceConclude = Boolean(req.body?.forceConclude);
+
+    const settings = getRuntimeSettings();
+    const inStockMaterials = listMaterials(true);
+    const result = await runMbtiGuideTurn({
+      history,
+      rawScores,
+      maxRounds,
+      forceConclude,
+      providerMode: settings.chatProviderMode,
+      inStockMaterials,
+    });
+    sendSuccess(res, result);
+  } catch (err: unknown) {
+    const e = err as { status?: number; code?: string; message?: string };
+    sendError(
+      req,
+      res,
+      e.status || 502,
+      e.code || 'PROVIDER_ERROR',
+      e.message || 'AI 人格引导分析失败，请稍后重试'
+    );
+  }
+});
+
 // ============================================================
-// 3. Dolls (Demo + Session Personal)
+// 3. NFC Tag Short Alias Resolution
+// ============================================================
+router.get('/nfc/resolve/:alias', (req, res) => {
+  const rawAlias = (req.params.alias || '').trim();
+  if (!rawAlias || rawAlias.length > 64) {
+    sendError(req, res, 400, 'INVALID_INPUT', '无效的 NFC 标签编号');
+    return;
+  }
+
+  const tag = db
+    .prepare(`SELECT alias, doll_id, label FROM nfc_tags WHERE LOWER(alias) = LOWER(?)`)
+    .get(rawAlias) as { alias: string; doll_id: string; label: string } | undefined;
+
+  if (tag) {
+    sendSuccess(res, {
+      alias: tag.alias,
+      dollId: tag.doll_id,
+      label: tag.label,
+    });
+    return;
+  }
+
+  // Fallback: allow direct dollId in /nfc/:dollId
+  const directDoll = db
+    .prepare(`SELECT id, name FROM dolls WHERE id = ?`)
+    .get(rawAlias) as { id: string; name: string } | undefined;
+
+  if (directDoll) {
+    sendSuccess(res, {
+      alias: directDoll.id,
+      dollId: directDoll.id,
+      label: directDoll.name,
+    });
+    return;
+  }
+
+  sendError(req, res, 404, 'NOT_FOUND', '未找到对应的 NFC 果壳标签映射');
+});
+
+// ============================================================
+// 4. Dolls (Demo + Session Personal)
 // ============================================================
 router.get('/dolls', ensureSession, (req, res) => {
   const sessionId = req.session!.id;
-  const baseUrl = buildPublicBaseUrl(req);
+  const baseUrl = getLiveBaseUrl(req);
 
   const rows = db
     .prepare(
       `SELECT d.id, d.kind, d.name, d.avatar_url, d.card_id, d.card_version_id, d.created_at,
               p.id AS persona_id, p.name AS persona_name, p.mbti AS persona_mbti,
+              p.mbti_group AS persona_mbti_group, p.cognitive_axis AS persona_cognitive_axis,
               p.tagline AS persona_tagline, p.material_hint AS persona_material_hint,
-              p.opening_line AS persona_opening_line
+              p.opening_line AS persona_opening_line,
+              (SELECT alias FROM nfc_tags nt WHERE nt.doll_id = d.id LIMIT 1) AS nfc_alias
        FROM dolls d
        JOIN personas p ON p.id = d.persona_id
        WHERE d.kind = 'demo' OR d.owner_session_id = ?
@@ -242,11 +544,15 @@ router.get('/dolls', ensureSession, (req, res) => {
       cardId: r.card_id ?? null,
       cardVersionId: r.card_version_id ?? null,
       dollUrl: `${baseUrl}/d/${r.id}`,
+      nfcUrl: r.nfc_alias ? `${baseUrl}/nfc/${r.nfc_alias}` : `${baseUrl}/d/${r.id}?entry=nfc`,
+      nfcAlias: r.nfc_alias ?? null,
       createdAt: r.created_at,
       persona: {
         id: r.persona_id,
         name: r.persona_name,
         mbti: r.persona_mbti,
+        mbtiGroup: r.persona_mbti_group,
+        cognitiveAxis: r.persona_cognitive_axis,
         tagline: r.persona_tagline,
         materialHint: r.persona_material_hint,
         openingLine: r.persona_opening_line,
@@ -257,14 +563,17 @@ router.get('/dolls', ensureSession, (req, res) => {
 
 router.get('/dolls/:id', ensureSession, async (req, res) => {
   const dollId = req.params.id;
-  const baseUrl = buildPublicBaseUrl(req);
+  const baseUrl = getLiveBaseUrl(req);
 
   const row = db
     .prepare(
       `SELECT d.id, d.kind, d.owner_session_id, d.name, d.avatar_url, d.card_id, d.card_version_id, d.created_at,
               p.id AS persona_id, p.name AS persona_name, p.mbti AS persona_mbti,
+              p.mbti_group AS persona_mbti_group, p.cognitive_axis AS persona_cognitive_axis,
+              p.speech_style AS persona_speech_style,
               p.tagline AS persona_tagline, p.material_hint AS persona_material_hint,
-              p.opening_line AS persona_opening_line
+              p.opening_line AS persona_opening_line,
+              (SELECT alias FROM nfc_tags nt WHERE nt.doll_id = d.id LIMIT 1) AS nfc_alias
        FROM dolls d
        JOIN personas p ON p.id = d.persona_id
        WHERE d.id = ?`
@@ -277,17 +586,19 @@ router.get('/dolls/:id', ensureSession, async (req, res) => {
   }
 
   const dollUrl = `${baseUrl}/d/${row.id}`;
+  const nfcUrl = row.nfc_alias ? `${baseUrl}/nfc/${row.nfc_alias}` : `${baseUrl}/d/${row.id}?entry=nfc`;
   const isOwner = row.kind === 'personal' && row.owner_session_id === req.session!.id;
-  const qrSvg = await generateQrSvg(dollUrl);
+  const qrSvg = await generateQrSvg(nfcUrl);
 
-  // Public doll profile NEVER exposes raw photoRef or other visitors' private data
   sendSuccess(res, {
     id: row.id,
     kind: row.kind,
     name: row.name,
     avatarUrl: row.avatar_url,
     dollUrl,
-    qrData: dollUrl,
+    nfcUrl,
+    nfcAlias: row.nfc_alias ?? null,
+    qrData: nfcUrl,
     qrSvg,
     isOwner,
     cardUrl: isOwner && row.card_id ? `${baseUrl}/card/${row.card_id}` : null,
@@ -297,6 +608,9 @@ router.get('/dolls/:id', ensureSession, async (req, res) => {
       id: row.persona_id,
       name: row.persona_name,
       mbti: row.persona_mbti,
+      mbtiGroup: row.persona_mbti_group,
+      cognitiveAxis: row.persona_cognitive_axis,
+      speechStyle: row.persona_speech_style,
       tagline: row.persona_tagline,
       materialHint: row.persona_material_hint,
       openingLine: row.persona_opening_line,
@@ -328,19 +642,18 @@ router.patch('/dolls/:id', ensureSession, (req, res) => {
     return;
   }
 
-  const now = new Date().toISOString();
   db.prepare(`UPDATE dolls SET name = ? WHERE id = ?`).run(rawName, dollId);
   db.prepare(
     `UPDATE memories
-     SET value = ?, updated_at = ?
+     SET value = ?
      WHERE doll_id = ? AND session_id = ? AND type = 'doll_name'`
-  ).run(rawName, now, dollId, sessionId);
+  ).run(rawName, dollId, sessionId);
 
   sendSuccess(res, { id: dollId, name: rawName });
 });
 
 // ============================================================
-// 4. Messages & Streaming Chat (SSE)
+// 5. Messages & Streaming Chat (SSE)
 // ============================================================
 router.get('/dolls/:id/messages', ensureSession, (req, res) => {
   const dollId = req.params.id;
@@ -425,6 +738,9 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     .prepare(
       `SELECT d.id, d.kind, d.name,
               p.id AS persona_id, p.name AS persona_name, p.mbti AS persona_mbti,
+              p.cognitive_axis AS persona_cognitive_axis,
+              p.speech_style AS persona_speech_style,
+              p.material_hint AS persona_material_hint,
               p.prompt AS persona_prompt, p.opening_line AS persona_opening_line
        FROM dolls d
        JOIN personas p ON p.id = d.persona_id
@@ -438,6 +754,9 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
         persona_id: string;
         persona_name: string;
         persona_mbti: string;
+        persona_cognitive_axis: string;
+        persona_speech_style: string;
+        persona_material_hint: string;
         persona_prompt: string;
         persona_opening_line: string;
       }
@@ -454,7 +773,9 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     return;
   }
 
-  // Check if an assistant reply for this clientMessageId is already completed (idempotent replay)
+  const runtimeSettings = getRuntimeSettings();
+  const providerMode = runtimeSettings.chatProviderMode;
+
   const completedReply = db
     .prepare(
       `SELECT id, content, provider, status
@@ -476,7 +797,7 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     writeSseEvent(res, 'meta', {
       requestId: req.requestId,
       clientMessageId,
-      provider: completedReply.provider || config.chatProvider,
+      provider: completedReply.provider || providerMode,
       replayed: true,
     });
     writeSseEvent(res, 'delta', { text: completedReply.content });
@@ -488,27 +809,23 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     return;
   }
 
-  // Check provider configuration BEFORE opening SSE stream (Section 10)
-  const providerMode = config.chatProvider;
   if (providerMode === 'cloud' && !isChatCloudConfigured()) {
     sendError(
       req,
       res,
       503,
       'PROVIDER_NOT_CONFIGURED',
-      '当前 CHAT_PROVIDER=cloud，但服务端未配置有效的 GEMINI_API_KEY 或 CHAT_API_KEY（本系统不静默回退为 mock）'
+      '当前对话模式为 cloud，但服务端未配置有效的 GEMINI_API_KEY 或 CHAT_API_KEY（可在 /dev 控制台切换为演示模式）'
     );
     return;
   }
 
-  // Persist user message BEFORE calling model (deduplicated by sessionId + dollId + clientMessageId)
   const now = new Date().toISOString();
   db.prepare(
     `INSERT OR IGNORE INTO messages (id, session_id, doll_id, client_message_id, reply_attempt, role, content, status, created_at)
      VALUES (?, ?, ?, ?, 0, 'user', ?, 'completed', ?)`
   ).run(`msg_${crypto.randomBytes(8).toString('hex')}`, sessionId, dollId, clientMessageId, text, now);
 
-  // Explicit memory write (rememberText field OR explicit prefix "记住：" / "记住:")
   let savedMemoryId: string | null = null;
   let rememberToSave = explicitRemember;
   if (!rememberToSave) {
@@ -542,7 +859,6 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     }
   }
 
-  // Compute reply_attempt for this clientMessageId
   const lastAttemptRow = db
     .prepare(
       `SELECT MAX(reply_attempt) AS max_attempt
@@ -552,7 +868,6 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     .get(sessionId, dollId, clientMessageId) as { max_attempt: number | null };
   const replyAttempt = (lastAttemptRow?.max_attempt ?? 0) + 1;
 
-  // Fetch explicit memories for (sessionId, dollId)
   const memories = db
     .prepare(
       `SELECT type, value, source
@@ -562,7 +877,6 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     )
     .all(sessionId, dollId) as Array<{ type: string; value: string; source: string }>;
 
-  // Fetch recent completed history messages (exclude current user message and failed/incomplete assistant messages)
   const historyRows = db
     .prepare(
       `SELECT role, content
@@ -578,7 +892,6 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
   }>;
   historyRows.reverse();
 
-  // Create pending assistant message row
   const assistantMessageId = `reply_${crypto.randomBytes(8).toString('hex')}`;
   const replyCreatedAt = new Date(Date.now() + 2).toISOString();
   db.prepare(
@@ -586,7 +899,6 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
      VALUES (?, ?, ?, ?, ?, 'assistant', '', 'streaming', ?, ?)`
   ).run(assistantMessageId, sessionId, dollId, clientMessageId, replyAttempt, providerMode, replyCreatedAt);
 
-  // Open SSE stream
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -624,6 +936,9 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
         id: dollRow.persona_id,
         name: dollRow.persona_name,
         mbti: dollRow.persona_mbti,
+        cognitiveAxis: dollRow.persona_cognitive_axis,
+        speechStyle: dollRow.persona_speech_style,
+        materialHint: dollRow.persona_material_hint,
         prompt: dollRow.persona_prompt,
         openingLine: dollRow.persona_opening_line,
       },
@@ -658,7 +973,7 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
           firstTokenMs,
           totalMs,
           requestId: event.providerRequestId ?? req.requestId,
-          detail: `doll=${dollId} attempt=${replyAttempt}`,
+          detail: `doll=${dollId} mbti=${dollRow.persona_mbti} attempt=${replyAttempt}`,
         });
 
         writeSseEvent(res, 'done', {
@@ -743,7 +1058,7 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
 });
 
 // ============================================================
-// 5. Explicit Memory CRUD (scoped by sessionId + dollId)
+// 6. Explicit Memory CRUD (scoped by sessionId + dollId)
 // ============================================================
 router.get('/dolls/:id/memory', ensureSession, (req, res) => {
   const dollId = req.params.id;
@@ -801,7 +1116,6 @@ router.post('/dolls/:id/memory', ensureSession, (req, res) => {
   }
 
   const now = new Date().toISOString();
-  // For single-value fields like user_nickname, replace previous entry cleanly
   if (type === 'user_nickname') {
     db.prepare(
       `DELETE FROM memories WHERE session_id = ? AND doll_id = ? AND type = 'user_nickname'`
@@ -845,11 +1159,11 @@ router.delete('/dolls/:id/memory/:memoryId', ensureSession, (req, res) => {
 });
 
 // ============================================================
-// 6. Cards, Versions, Redraw, Cancel, Fallback & Bind
+// 7. Cards, Versions, Redraw, Cancel, Fallback & Bind
 // ============================================================
 router.get('/cards', ensureSession, (req, res) => {
   const sessionId = req.session!.id;
-  const baseUrl = buildPublicBaseUrl(req);
+  const baseUrl = getLiveBaseUrl(req);
   const maxAttempts = 1 + config.maxRegenerations;
 
   const cards = db
@@ -916,13 +1230,18 @@ router.post('/cards', ensureSession, (req, res) => {
     } else if (typeof req.body?.accessoryIds === 'string' && req.body.accessoryIds.trim()) {
       try {
         const parsed = JSON.parse(req.body.accessoryIds);
-        accessoryIds = Array.isArray(parsed) ? parsed.map(String) : req.body.accessoryIds.split(',').map((s: string) => s.trim()).filter(Boolean);
+        accessoryIds = Array.isArray(parsed)
+          ? parsed.map(String)
+          : req.body.accessoryIds.split(',').map((s: string) => s.trim()).filter(Boolean);
       } catch {
         accessoryIds = req.body.accessoryIds.split(',').map((s: string) => s.trim()).filter(Boolean);
       }
     }
-    const validAccessorySet = new Set(ACCESSORY_OPTIONS.map((a) => a.id));
-    accessoryIds = accessoryIds.filter((id) => validAccessorySet.has(id));
+
+    // Validate against live in-stock SQLite craft materials
+    const inStockMaterials = listMaterials(true);
+    const validMaterialSet = new Set(inStockMaterials.map((m) => m.id));
+    accessoryIds = Array.from(new Set(accessoryIds.filter((id) => validMaterialSet.has(id)))).slice(0, 6);
 
     if (!req.file?.buffer) {
       sendError(req, res, 400, 'INVALID_INPUT', '请上传一张 JPEG、PNG 或 WebP 照片');
@@ -938,7 +1257,6 @@ router.post('/cards', ensureSession, (req, res) => {
       return;
     }
 
-    // Validate image binary content & 2MB limit
     let validatedImage;
     try {
       validatedImage = validateImageBuffer(req.file.buffer);
@@ -948,7 +1266,6 @@ router.post('/cards', ensureSession, (req, res) => {
       return;
     }
 
-    // Check idempotency before creating card
     const photoHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
     const requestHash = hashObject({ userNickname, personaId, accessoryIds, photoHash });
     const idem = checkIdempotency(sessionId, 'create_card', idempotencyKey, requestHash);
@@ -961,15 +1278,15 @@ router.post('/cards', ensureSession, (req, res) => {
       return;
     }
 
-    // Check cloud image configuration before creating task
-    const providerMode = config.imageProvider;
+    const runtimeSettings = getRuntimeSettings();
+    const providerMode = runtimeSettings.imageProviderMode;
     if (providerMode === 'cloud' && !isImageCloudConfigured()) {
       sendError(
         req,
         res,
         503,
         'PROVIDER_NOT_CONFIGURED',
-        '当前 IMAGE_PROVIDER=cloud，但服务端未配置有效的 IMAGE_API_KEY 或 GEMINI_API_KEY（不静默回退为 mock）'
+        '当前出图模式为 cloud，但服务端未配置有效的 GEMINI_API_KEY 或 IMAGE_API_KEY（可在 /dev 控制台切换为演示模式）'
       );
       return;
     }
@@ -1013,13 +1330,14 @@ router.post('/cards', ensureSession, (req, res) => {
       markVersionSimulateFail(versionId);
     }
 
-    const baseUrl = buildPublicBaseUrl(req);
+    const baseUrl = getLiveBaseUrl(req);
     const responsePayload = {
       data: {
         cardId,
         versionId,
         status: 'queued',
         provider: providerMode,
+        imageModelTier: runtimeSettings.imageModelTier,
         cardUrl: `${baseUrl}/card/${cardId}`,
         processingUrl: `${baseUrl}/create/processing?cardId=${cardId}`,
       },
@@ -1034,7 +1352,7 @@ router.post('/cards', ensureSession, (req, res) => {
 router.get('/cards/:id', ensureSession, async (req, res) => {
   const cardId = req.params.id;
   const sessionId = req.session!.id;
-  const baseUrl = buildPublicBaseUrl(req);
+  const baseUrl = getLiveBaseUrl(req);
 
   const card = db
     .prepare(
@@ -1046,7 +1364,6 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
     .get(cardId, sessionId) as Record<string, unknown> | undefined;
 
   if (!card) {
-    // Unowned private resources always return 404
     sendError(req, res, 404, 'NOT_FOUND', '未找到对应的创作卡片');
     return;
   }
@@ -1083,6 +1400,8 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
     }
   }
 
+  const parsedAccIds = JSON.parse(String(card.accessory_ids || '[]')) as string[];
+
   sendSuccess(res, {
     id: card.id,
     userNickname: card.user_nickname,
@@ -1094,8 +1413,8 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
       tagline: card.persona_tagline,
       materialHint: card.persona_material_hint,
     },
-    accessoryIds: JSON.parse(String(card.accessory_ids || '[]')),
-    accessoryLabels: getAccessoryLabels(JSON.parse(String(card.accessory_ids || '[]'))),
+    accessoryIds: parsedAccIds,
+    accessoryLabels: resolveMaterialLabels(parsedAccIds),
     activeVersionId: card.active_version_id,
     boundDollId: card.bound_doll_id ?? null,
     boundDoll,
@@ -1176,14 +1495,15 @@ router.post('/cards/:id/redraw', ensureSession, (req, res) => {
     return;
   }
 
-  const providerMode = config.imageProvider;
+  const runtimeSettings = getRuntimeSettings();
+  const providerMode = runtimeSettings.imageProviderMode;
   if (providerMode === 'cloud' && !isImageCloudConfigured()) {
     sendError(
       req,
       res,
       503,
       'PROVIDER_NOT_CONFIGURED',
-      '当前 IMAGE_PROVIDER=cloud，但服务端未配置有效的生图密钥'
+      '当前出图模式为 cloud，但服务端未配置有效的生图密钥'
     );
     return;
   }
@@ -1405,13 +1725,11 @@ router.post('/cards/:id/fallback', ensureSession, (req, res) => {
         });
       }
 
-      // Max 1 template fallback version per card (Section 3.4); does NOT consume generation_attempts
       const existingTpl = db
         .prepare(`SELECT * FROM card_versions WHERE card_id = ? AND result_kind = 'template' LIMIT 1`)
         .get(cardId) as Record<string, unknown> | undefined;
 
       if (existingTpl) {
-        // Update chosen template image cleanly while keeping single template version constraint
         db.prepare(`UPDATE card_versions SET result_url = ?, suggested_name = ? WHERE id = ?`).run(
           template.imageUrl,
           template.name.replace(' · 预设版', ''),
@@ -1497,7 +1815,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
     return;
   }
 
-  const baseUrl = buildPublicBaseUrl(req);
+  const baseUrl = getLiveBaseUrl(req);
   let resultStatus = 201;
   let resultDollId = '';
 
@@ -1534,7 +1852,6 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
         });
       }
 
-      // Already bound handling (Section 10)
       if (card.bound_doll_id) {
         const existingDoll = db
           .prepare(`SELECT id, card_version_id FROM dolls WHERE id = ?`)
@@ -1574,7 +1891,6 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
         cardId
       );
 
-      // Write explicit creation facts into memories for (sessionId, dollId)
       const insertMem = db.prepare(
         `INSERT INTO memories (id, session_id, doll_id, type, value, source, created_at)
          VALUES (?, ?, ?, ?, ?, 'creation_form', ?)`
@@ -1605,7 +1921,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
         nowIso
       );
 
-      const accessoryLabels = getAccessoryLabels(JSON.parse(String(card.accessory_ids || '[]')));
+      const accessoryLabels = resolveMaterialLabels(JSON.parse(String(card.accessory_ids || '[]')));
       if (accessoryLabels.length > 0) {
         insertMem.run(
           `mem_${crypto.randomBytes(6).toString('hex')}`,
@@ -1640,7 +1956,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
 });
 
 // ============================================================
-// 7. Mock Output Jobs (Plot / Print Simulation)
+// 8. Mock Output Jobs (Plot / Print Simulation)
 // ============================================================
 const ALLOWED_PAPER_SIZES = new Set(['A6', 'A5', 'SQUARE_100']);
 
@@ -1781,7 +2097,7 @@ router.get('/plot/jobs/:id', ensureSession, (req, res) => {
 });
 
 // ============================================================
-// 8. Persistent Generated Asset Serving & Download
+// 9. Persistent Generated Asset Serving & Download
 // ============================================================
 router.get('/assets/generated/:filename', (req, res) => {
   const safeName = path.basename(req.params.filename);
@@ -1811,9 +2127,12 @@ router.get('/assets/generated/:filename', (req, res) => {
 });
 
 // ============================================================
-// 9. Protected Demo Admin Endpoints (/api/demo/status, /api/demo/reset)
+// 10. Protected Demo Admin Endpoints (/api/demo/*)
 // ============================================================
-router.get('/demo/status', requireAdmin, (_req, res) => {
+router.get('/demo/status', requireAdmin, (req, res) => {
+  const settings = getRuntimeSettings();
+  const liveBaseUrl = buildPublicBaseUrl(req, settings.nfcPublicBaseUrl);
+
   const versionStats = db
     .prepare(
       `SELECT provider, result_kind, status, COUNT(*) AS cnt, AVG(latency_ms) AS avg_ms
@@ -1873,25 +2192,59 @@ router.get('/demo/status', requireAdmin, (_req, res) => {
     )
     .all();
 
+  const nfcTagRows = db
+    .prepare(
+      `SELECT nt.alias, nt.doll_id, nt.label, nt.last_written_at, nt.created_at,
+              d.name AS doll_name, d.kind AS doll_kind, p.mbti AS persona_mbti, p.name AS persona_name
+       FROM nfc_tags nt
+       LEFT JOIN dolls d ON d.id = nt.doll_id
+       LEFT JOIN personas p ON p.id = d.persona_id
+       ORDER BY nt.created_at ASC`
+    )
+    .all() as Array<Record<string, unknown>>;
+
+  const allDolls = db
+    .prepare(
+      `SELECT d.id, d.name, d.kind, p.mbti AS persona_mbti, p.name AS persona_name
+       FROM dolls d
+       JOIN personas p ON p.id = d.persona_id
+       ORDER BY CASE WHEN d.kind = 'demo' THEN 0 ELSE 1 END, d.created_at DESC
+       LIMIT 40`
+    )
+    .all() as Array<Record<string, unknown>>;
+
+  const allMaterials = listMaterials(false);
+
   sendSuccess(res, {
+    settings: {
+      ...settings,
+      effectiveBaseUrl: liveBaseUrl,
+      imageModelTierLabel: IMAGE_TIER_LABELS[settings.imageModelTier],
+      availableImageModels: IMAGE_MODEL_BY_TIER,
+    },
     providers: {
       chat: {
-        mode: config.chatProvider,
+        mode: settings.chatProviderMode,
         model: config.chatModel,
-        configured: config.chatProvider === 'mock' ? true : isChatCloudConfigured(),
+        configured: settings.chatProviderMode === 'mock' ? true : isChatCloudConfigured(),
+        cloudKeyAvailable: isChatCloudConfigured(),
         viaOpenAICompatible: Boolean(config.chatApiBase),
         firstTokenTimeoutMs: config.chatFirstTokenTimeoutMs,
         firstTokenTargetMs: 3000,
         contextMaxMessages: config.chatContextMaxMessages,
       },
       image: {
-        mode: config.imageProvider,
-        model: config.imageModel,
-        configured: config.imageProvider === 'mock' ? true : isImageCloudConfigured(),
+        mode: settings.imageProviderMode,
+        model: settings.imageModel,
+        tier: settings.imageModelTier,
+        tierLabel: IMAGE_TIER_LABELS[settings.imageModelTier],
+        configured: settings.imageProviderMode === 'mock' ? true : isImageCloudConfigured(),
+        cloudKeyAvailable: isImageCloudConfigured(),
         viaOpenAICompatible: Boolean(config.imageApiBase),
         timeoutMs: config.imageTimeoutMs,
         performanceTargetMs: 40000,
         maxRegenerations: config.maxRegenerations,
+        strictMaterialConstraint: settings.strictMaterialConstraint,
       },
       output: {
         mode: config.outputProvider,
@@ -1903,7 +2256,30 @@ router.get('/demo/status', requireAdmin, (_req, res) => {
       personalDolls: (db.prepare(`SELECT COUNT(*) AS c FROM dolls WHERE kind = 'personal'`).get() as { c: number }).c,
       cards: (db.prepare(`SELECT COUNT(*) AS c FROM cards`).get() as { c: number }).c,
       personas: (db.prepare(`SELECT COUNT(*) AS c FROM personas`).get() as { c: number }).c,
+      materialsTotal: allMaterials.length,
+      materialsInStock: allMaterials.filter((m) => m.inStock).length,
     },
+    nfcTags: nfcTagRows.map((t) => ({
+      alias: String(t.alias),
+      dollId: String(t.doll_id),
+      label: String(t.label),
+      dollName: t.doll_name ? String(t.doll_name) : String(t.doll_id),
+      dollKind: t.doll_kind ? String(t.doll_kind) : 'demo',
+      personaMbti: t.persona_mbti ? String(t.persona_mbti) : '',
+      personaName: t.persona_name ? String(t.persona_name) : '',
+      nfcUrl: `${liveBaseUrl}/nfc/${t.alias}`,
+      directUrl: `${liveBaseUrl}/d/${t.doll_id}?entry=nfc`,
+      lastWrittenAt: t.last_written_at ? String(t.last_written_at) : null,
+      createdAt: String(t.created_at),
+    })),
+    dollsForNfc: allDolls.map((d) => ({
+      id: String(d.id),
+      name: String(d.name),
+      kind: String(d.kind),
+      personaMbti: String(d.persona_mbti),
+      personaName: String(d.persona_name),
+      directUrl: `${liveBaseUrl}/d/${d.id}?entry=nfc`,
+    })),
     metrics: {
       chat: chatStats,
       image: versionStats,
@@ -1912,6 +2288,311 @@ router.get('/demo/status', requireAdmin, (_req, res) => {
     activeSessions,
     recentErrors,
     recentRuns,
+  });
+});
+
+router.patch('/demo/settings', requireAdmin, (req, res) => {
+  const body = req.body ?? {};
+
+  if (typeof body.nfcPublicBaseUrl === 'string') {
+    const validated = validatePublicBaseUrl(body.nfcPublicBaseUrl);
+    if (validated === null) {
+      sendError(req, res, 400, 'INVALID_INPUT', '工位访问地址须以 http:// 或 https:// 开头，或留空使用默认地址');
+      return;
+    }
+    setRuntimeSetting('nfc_public_base_url', validated);
+  }
+
+  if (body.imageModelTier !== undefined) {
+    const tier = String(body.imageModelTier).trim() as ImageModelTier;
+    if (tier !== 'fast' && tier !== 'hd') {
+      sendError(req, res, 400, 'INVALID_INPUT', 'imageModelTier 仅支持 fast 或 hd');
+      return;
+    }
+    setRuntimeSetting('image_model_tier', tier);
+  }
+
+  if (body.chatProviderMode !== undefined) {
+    const mode = String(body.chatProviderMode).trim() as ProviderMode;
+    if (mode !== 'cloud' && mode !== 'mock') {
+      sendError(req, res, 400, 'INVALID_INPUT', 'chatProviderMode 仅支持 cloud 或 mock');
+      return;
+    }
+    setRuntimeSetting('chat_provider_mode', mode);
+  }
+
+  if (body.imageProviderMode !== undefined) {
+    const mode = String(body.imageProviderMode).trim() as ProviderMode;
+    if (mode !== 'cloud' && mode !== 'mock') {
+      sendError(req, res, 400, 'INVALID_INPUT', 'imageProviderMode 仅支持 cloud 或 mock');
+      return;
+    }
+    setRuntimeSetting('image_provider_mode', mode);
+  }
+
+  if (typeof body.strictMaterialConstraint === 'boolean') {
+    setRuntimeSetting('strict_material_constraint', body.strictMaterialConstraint ? 'true' : 'false');
+  }
+
+  const updated = getRuntimeSettings();
+  recordRunLog({
+    id: `log_${crypto.randomBytes(6).toString('hex')}`,
+    kind: 'system',
+    provider: 'admin',
+    status: 'succeeded',
+    detail: `settings updated tier=${updated.imageModelTier} chat=${updated.chatProviderMode} img=${updated.imageProviderMode} strictMat=${updated.strictMaterialConstraint}`,
+  });
+
+  sendSuccess(res, {
+    ...updated,
+    effectiveBaseUrl: buildPublicBaseUrl(req, updated.nfcPublicBaseUrl),
+    imageModelTierLabel: IMAGE_TIER_LABELS[updated.imageModelTier],
+  });
+});
+
+// ---- Admin NFC Tag Management ----
+router.post('/demo/nfc-tags', requireAdmin, (req, res) => {
+  const alias = typeof req.body?.alias === 'string' ? req.body.alias.trim().toLowerCase() : '';
+  const dollId = typeof req.body?.dollId === 'string' ? req.body.dollId.trim() : '';
+  const label = typeof req.body?.label === 'string' ? req.body.label.trim() : '';
+
+  if (!/^[a-z0-9_-]{2,32}$/.test(alias)) {
+    sendError(req, res, 400, 'INVALID_INPUT', '标签短码需为 2–32 位小写字母、数字、连字符或下划线');
+    return;
+  }
+  const doll = db.prepare(`SELECT id, name FROM dolls WHERE id = ?`).get(dollId) as
+    | { id: string; name: string }
+    | undefined;
+  if (!doll) {
+    sendError(req, res, 404, 'NOT_FOUND', '未找到目标娃娃');
+    return;
+  }
+
+  const finalLabel = (label || `${doll.name} · NFC 展位签`).slice(0, 60);
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO nfc_tags (alias, doll_id, label, created_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(alias) DO UPDATE SET doll_id = excluded.doll_id, label = excluded.label`
+  ).run(alias, dollId, finalLabel, now);
+
+  const baseUrl = getLiveBaseUrl(req);
+  sendSuccess(
+    res,
+    {
+      alias,
+      dollId,
+      label: finalLabel,
+      nfcUrl: `${baseUrl}/nfc/${alias}`,
+    },
+    201
+  );
+});
+
+router.post('/demo/nfc-tags/:alias/written', requireAdmin, (req, res) => {
+  const alias = (req.params.alias || '').trim().toLowerCase();
+  const now = new Date().toISOString();
+  const upd = db
+    .prepare(`UPDATE nfc_tags SET last_written_at = ? WHERE LOWER(alias) = ?`)
+    .run(now, alias);
+
+  if (upd.changes === 0) {
+    sendError(req, res, 404, 'NOT_FOUND', '未找到对应的 NFC 标签映射');
+    return;
+  }
+  sendSuccess(res, { alias, lastWrittenAt: now });
+});
+
+// ---- Admin Real Craft Materials Inventory CRUD + JSON Import ----
+router.get('/demo/materials', requireAdmin, (_req, res) => {
+  sendSuccess(res, {
+    categories: MATERIAL_CATEGORY_LABELS,
+    items: listMaterials(false),
+  });
+});
+
+router.post('/demo/materials', requireAdmin, (req, res) => {
+  const body = req.body ?? {};
+  const rawId = typeof body.id === 'string' && body.id.trim()
+    ? body.id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_')
+    : `mat_${crypto.randomBytes(4).toString('hex')}`;
+  const label = typeof body.label === 'string' ? body.label.trim() : '';
+  const category = (typeof body.category === 'string' ? body.category.trim() : 'hardware_charm') as MaterialCategory;
+  const material = typeof body.material === 'string' ? body.material.trim() : '';
+  const visualHint = typeof body.visualHint === 'string' ? body.visualHint.trim() : '';
+  const inStock = body.inStock !== false;
+  const sortOrder = Number.isFinite(Number(body.sortOrder)) ? Number(body.sortOrder) : 50;
+
+  if (!label || label.length > 40) {
+    sendError(req, res, 400, 'INVALID_INPUT', '材料名称需在 1–40 字之间');
+    return;
+  }
+  if (!VALID_MATERIAL_CATEGORIES.has(category)) {
+    sendError(req, res, 400, 'INVALID_INPUT', '无效的材料分类');
+    return;
+  }
+  if (!material || material.length > 60) {
+    sendError(req, res, 400, 'INVALID_INPUT', '材质说明需在 1–60 字之间');
+    return;
+  }
+
+  const finalVisualHint = (visualHint || `handmade ${material} craft accessory (${label})`).slice(0, 260);
+  const now = new Date().toISOString();
+
+  db.prepare(
+    `INSERT INTO materials (id, label, category, material, visual_hint, in_stock, sort_order, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       label = excluded.label,
+       category = excluded.category,
+       material = excluded.material,
+       visual_hint = excluded.visual_hint,
+       in_stock = excluded.in_stock,
+       sort_order = excluded.sort_order,
+       updated_at = excluded.updated_at`
+  ).run(rawId, label, category, material, finalVisualHint, inStock ? 1 : 0, sortOrder, now, now);
+
+  sendSuccess(
+    res,
+    {
+      id: rawId,
+      label,
+      category,
+      material,
+      visualHint: finalVisualHint,
+      inStock,
+      sortOrder,
+    },
+    201
+  );
+});
+
+router.patch('/demo/materials/:id', requireAdmin, (req, res) => {
+  const matId = req.params.id;
+  const existing = db.prepare(`SELECT * FROM materials WHERE id = ?`).get(matId) as Record<string, unknown> | undefined;
+  if (!existing) {
+    sendError(req, res, 404, 'NOT_FOUND', '未找到对应的材料条目');
+    return;
+  }
+
+  const body = req.body ?? {};
+  const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 40) : String(existing.label);
+  const category = (typeof body.category === 'string' && VALID_MATERIAL_CATEGORIES.has(body.category as MaterialCategory)
+    ? body.category
+    : existing.category) as MaterialCategory;
+  const material = typeof body.material === 'string' && body.material.trim() ? body.material.trim().slice(0, 60) : String(existing.material);
+  const visualHint = typeof body.visualHint === 'string' && body.visualHint.trim() ? body.visualHint.trim().slice(0, 260) : String(existing.visual_hint);
+  const inStock = typeof body.inStock === 'boolean' ? (body.inStock ? 1 : 0) : Number(existing.in_stock);
+  const now = new Date().toISOString();
+
+  db.prepare(
+    `UPDATE materials
+     SET label = ?, category = ?, material = ?, visual_hint = ?, in_stock = ?, updated_at = ?
+     WHERE id = ?`
+  ).run(label, category, material, visualHint, inStock, now, matId);
+
+  sendSuccess(res, {
+    id: matId,
+    label,
+    category,
+    material,
+    visualHint,
+    inStock: inStock === 1,
+  });
+});
+
+router.delete('/demo/materials/:id', requireAdmin, (req, res) => {
+  const matId = req.params.id;
+  const del = db.prepare(`DELETE FROM materials WHERE id = ?`).run(matId);
+  if (del.changes === 0) {
+    sendError(req, res, 404, 'NOT_FOUND', '未找到要删除的材料');
+    return;
+  }
+  res.status(204).end();
+});
+
+router.post('/demo/materials/import', requireAdmin, (req, res) => {
+  const mode = req.body?.mode === 'replace' ? 'replace' : 'merge';
+  const rawItems = Array.isArray(req.body?.items) ? req.body.items : null;
+
+  if (!rawItems || rawItems.length === 0) {
+    sendError(req, res, 400, 'INVALID_INPUT', '请提供非空的材料列表 JSON（items 数组）');
+    return;
+  }
+  if (rawItems.length > 100) {
+    sendError(req, res, 400, 'INVALID_INPUT', '单次最多导入 100 条材料记录');
+    return;
+  }
+
+  const normalized: Array<{
+    id: string;
+    label: string;
+    category: MaterialCategory;
+    material: string;
+    visualHint: string;
+    inStock: number;
+    sortOrder: number;
+  }> = [];
+
+  for (let i = 0; i < rawItems.length; i++) {
+    const item = rawItems[i] as Record<string, unknown>;
+    const label = typeof item?.label === 'string' ? item.label.trim() : '';
+    const material = typeof item?.material === 'string' ? item.material.trim() : '';
+    if (!label || !material) {
+      sendError(req, res, 400, 'INVALID_INPUT', `第 ${i + 1} 条材料缺少必填字段 label 或 material`);
+      return;
+    }
+    const rawCat = typeof item?.category === 'string' ? item.category.trim() : 'hardware_charm';
+    const category = VALID_MATERIAL_CATEGORIES.has(rawCat as MaterialCategory)
+      ? (rawCat as MaterialCategory)
+      : 'hardware_charm';
+    const id =
+      typeof item?.id === 'string' && item.id.trim()
+        ? item.id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').slice(0, 48)
+        : `mat_imp_${i + 1}_${crypto.randomBytes(3).toString('hex')}`;
+    const visualHint =
+      typeof item?.visualHint === 'string' && item.visualHint.trim()
+        ? item.visualHint.trim().slice(0, 260)
+        : `handmade ${material} craft component (${label})`;
+
+    normalized.push({
+      id,
+      label: label.slice(0, 40),
+      category,
+      material: material.slice(0, 60),
+      visualHint,
+      inStock: item?.inStock === false ? 0 : 1,
+      sortOrder: Number.isFinite(Number(item?.sortOrder)) ? Number(item.sortOrder) : (i + 1) * 5,
+    });
+  }
+
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    if (mode === 'replace') {
+      db.prepare(`DELETE FROM materials`).run();
+    }
+    const upsert = db.prepare(
+      `INSERT INTO materials (id, label, category, material, visual_hint, in_stock, sort_order, created_at, updated_at)
+       VALUES (@id, @label, @category, @material, @visualHint, @inStock, @sortOrder, @now, @now)
+       ON CONFLICT(id) DO UPDATE SET
+         label = excluded.label,
+         category = excluded.category,
+         material = excluded.material,
+         visual_hint = excluded.visual_hint,
+         in_stock = excluded.in_stock,
+         sort_order = excluded.sort_order,
+         updated_at = excluded.updated_at`
+    );
+    for (const row of normalized) {
+      upsert.run({ ...row, now });
+    }
+  });
+  tx();
+
+  sendSuccess(res, {
+    mode,
+    importedCount: normalized.length,
+    totalCount: listMaterials(false).length,
   });
 });
 
@@ -1939,7 +2620,6 @@ router.post('/demo/reset', requireAdmin, (req, res) => {
     return;
   }
 
-  // Reject reset if there are running tasks in this session (Section 4 Flow D)
   const runningVer = db
     .prepare(
       `SELECT cv.id
@@ -1967,7 +2647,6 @@ router.post('/demo/reset', requireAdmin, (req, res) => {
     return;
   }
 
-  // Gather files to delete after transaction commits
   const filesToDelete: string[] = [];
   const cards = db
     .prepare(`SELECT id, photo_ref FROM cards WHERE owner_session_id = ?`)
@@ -1993,6 +2672,7 @@ router.post('/demo/reset', requireAdmin, (req, res) => {
     db.prepare(`DELETE FROM dolls WHERE kind = 'personal' AND owner_session_id = ?`).run(targetSessionId);
     db.prepare(`DELETE FROM cards WHERE owner_session_id = ?`).run(targetSessionId);
     db.prepare(`DELETE FROM idempotency_keys WHERE session_id = ?`).run(targetSessionId);
+    db.prepare(`DELETE FROM session_claim_codes WHERE session_id = ?`).run(targetSessionId);
     db.prepare(`UPDATE sessions SET invalidated = 1 WHERE id = ?`).run(targetSessionId);
   });
   resetTx();
@@ -2007,7 +2687,6 @@ router.post('/demo/reset', requireAdmin, (req, res) => {
     }
   }
 
-  // If resetting caller's own session, clear cookie so next action starts fresh
   const callerSession = loadExistingSession(req);
   if (callerSession?.id === targetSessionId) {
     clearSessionCookie(req, res);

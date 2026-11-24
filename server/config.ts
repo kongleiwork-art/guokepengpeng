@@ -4,6 +4,17 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 export type ProviderMode = 'mock' | 'cloud';
+export type ImageModelTier = 'fast' | 'hd';
+
+export const IMAGE_MODEL_BY_TIER: Record<ImageModelTier, string> = {
+  fast: 'gemini-3.1-flash-lite-image',
+  hd: 'gemini-nano-banana-2.1',
+};
+
+export const IMAGE_TIER_LABELS: Record<ImageModelTier, string> = {
+  fast: 'Nano Banana 极速版',
+  hd: 'Nano Banana 2.1 高清精绘版',
+};
 
 function resolveProviderMode(
   explicit: string | undefined,
@@ -45,13 +56,14 @@ export const config = {
   chatFirstTokenTimeoutMs: Math.max(1000, Number(process.env.CHAT_FIRST_TOKEN_TIMEOUT_MS || 10000)),
   chatContextMaxMessages: Math.max(4, Number(process.env.CHAT_CONTEXT_MAX_MESSAGES || 20)),
 
+  // Auto-enable cloud Nano image generation whenever GEMINI_API_KEY or IMAGE_API_KEY is present
   imageProvider: resolveProviderMode(
     process.env.IMAGE_PROVIDER,
-    hasValidImageKey
+    hasValidImageKey || hasValidGeminiKey
   ),
   imageApiBase: rawImageBase,
   imageApiKey: hasValidImageKey ? rawImageKey : '',
-  imageModel: (process.env.IMAGE_MODEL || 'gemini-3.1-flash-lite-image').trim(),
+  imageModel: (process.env.IMAGE_MODEL || IMAGE_MODEL_BY_TIER.fast).trim(),
   imageTimeoutMs: Math.max(5000, Number(process.env.IMAGE_TIMEOUT_MS || 60000)),
   maxRegenerations: Math.max(0, Number(process.env.MAX_REGENERATIONS || 2)),
 
@@ -74,7 +86,28 @@ export function isImageCloudConfigured(): boolean {
   return Boolean(config.imageApiKey || config.geminiApiKey);
 }
 
-export function buildPublicBaseUrl(req?: { protocol?: string; get?: (name: string) => string | undefined }): string {
+export function validatePublicBaseUrl(raw: string): string | null {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname}`.replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
+
+export function buildPublicBaseUrl(
+  req?: { protocol?: string; get?: (name: string) => string | undefined },
+  overrideBaseUrl?: string | null
+): string {
+  if (overrideBaseUrl && overrideBaseUrl.trim()) {
+    const valid = validatePublicBaseUrl(overrideBaseUrl);
+    if (valid) return valid;
+  }
   if (req?.get) {
     const forwardedHost = req.get('x-forwarded-host') || req.get('host');
     const forwardedProto = req.get('x-forwarded-proto') || req.protocol || 'http';

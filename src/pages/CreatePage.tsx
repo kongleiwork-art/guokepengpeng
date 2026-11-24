@@ -1,18 +1,63 @@
-import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { AnimatePresence, motion } from 'motion/react';
-import { ArrowLeft, ArrowRight, Camera, Check, RefreshCw, Upload, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { motion } from 'motion/react';
+import {
+  ArrowLeft,
+  ArrowRight,
+  Camera,
+  Check,
+  RefreshCw,
+  Sparkles,
+  Upload,
+  Wand2,
+  X,
+} from 'lucide-react';
 import { api, ApiError, compressImageForUpload, generateIdempotencyKey } from '../lib/api';
-import type { AccessoryOption, PersonaPublic } from '../lib/types';
+import type {
+  AccessoryOption,
+  MaterialCategory,
+  MbtiRecommendation,
+  PersonaPublic,
+} from '../lib/types';
 import { WatercolorPersonaGridSkeleton } from '../components/WatercolorLoader';
+import { MbtiAiGuidePanel } from '../components/MbtiAiGuidePanel';
 import { haptic } from '../lib/haptics';
-
-const EASE_STUDIO = [0.22, 1, 0.36, 1] as const;
 
 type WizardStep = 1 | 2 | 3;
 
+const CATEGORY_ORDER: MaterialCategory[] = [
+  'nut_body',
+  'yarn_hair',
+  'fabric_outfit',
+  'hardware_charm',
+  'dried_botanical',
+];
+
+const CATEGORY_LABELS: Record<MaterialCategory, string> = {
+  nut_body: '天然果实主体',
+  yarn_hair: '毛线与发丝',
+  fabric_outfit: '布艺与服饰',
+  hardware_charm: '挂饰与五金',
+  dried_botanical: '干燥花草点缀',
+};
+
 export function CreatePage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const presetPersonaId = searchParams.get('personaId') || '';
+
+  const [isDesktop, setIsDesktop] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.matchMedia('(min-width: 1024px)').matches : false
+  );
+
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)');
+    const onChange = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
+    setIsDesktop(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
   const [personas, setPersonas] = useState<PersonaPublic[]>([]);
   const [accessories, setAccessories] = useState<AccessoryOption[]>([]);
   const [loadingInit, setLoadingInit] = useState(true);
@@ -22,11 +67,16 @@ export function CreatePage() {
 
   const [userNickname, setUserNickname] = useState('');
   const [personaId, setPersonaId] = useState('persona_enfp');
+  const [personaMode, setPersonaMode] = useState<'ai_guide' | 'manual'>(
+    presetPersonaId ? 'manual' : 'ai_guide'
+  );
   const [showAllPersonas, setShowAllPersonas] = useState(false);
-  const [selectedAccessories, setSelectedAccessories] = useState<string[]>([
-    'hat_gingham',
-    'bell_copper',
-  ]);
+  const [selectedAccessories, setSelectedAccessories] = useState<string[]>([]);
+
+  // Optional Selfie AI Recommendation in manual tab
+  const [recommending, setRecommending] = useState(false);
+  const [recommendation, setRecommendation] = useState<MbtiRecommendation | null>(null);
+  const [recommendError, setRecommendError] = useState<string | null>(null);
 
   const [photoSourceMode, setPhotoSourceMode] = useState<'upload' | 'camera'>('upload');
   const [photoFile, setPhotoFile] = useState<File | null>(null);
@@ -52,13 +102,23 @@ export function CreatePage() {
         if (!active) return;
         setPersonas(pList);
         setAccessories(aList);
-        if (pList.length > 0) setPersonaId(pList[0].id);
-        if (aList.length > 0) {
-          setSelectedAccessories((prev) => {
-            const validIds = new Set(aList.map((a) => a.id));
-            const filtered = prev.filter((id) => validIds.has(id));
-            return filtered.length > 0 ? filtered : [aList[0].id];
-          });
+
+        const matchedPreset = presetPersonaId
+          ? pList.find((p) => p.id === presetPersonaId || p.mbti.toLowerCase() === presetPersonaId.toLowerCase())
+          : undefined;
+        const initialPersona = matchedPreset ?? pList[0];
+        if (initialPersona) {
+          setPersonaId(initialPersona.id);
+          if (!initialPersona.featured) {
+            setShowAllPersonas(true);
+          }
+          const validIds = new Set(aList.map((a) => a.id));
+          const recommended = (initialPersona.recommendedMaterials ?? []).filter((id) => validIds.has(id));
+          if (recommended.length > 0) {
+            setSelectedAccessories(recommended.slice(0, 3));
+          } else if (aList.length > 0) {
+            setSelectedAccessories(aList.slice(0, 2).map((a) => a.id));
+          }
         }
       } finally {
         if (active) setLoadingInit(false);
@@ -68,7 +128,7 @@ export function CreatePage() {
       active = false;
       stopCamera();
     };
-  }, []);
+  }, [presetPersonaId]);
 
   useEffect(() => {
     return () => {
@@ -105,9 +165,7 @@ export function CreatePage() {
       });
     } catch (err) {
       setCameraError(
-        err instanceof Error
-          ? `无法打开摄像头：${err.message}`
-          : '无法打开摄像头，请改用相册上传'
+        err instanceof Error ? `无法打开摄像头：${err.message}` : '无法打开摄像头，请改用相册上传'
       );
     }
   };
@@ -160,12 +218,63 @@ export function CreatePage() {
     await acceptImageBlob(file, file.name);
   };
 
+  const applyPersonaSelection = (targetIdOrMbti: string, suggestedMatIds?: string[]) => {
+    const matched = personas.find(
+      (p) => p.id === targetIdOrMbti || p.mbti.toUpperCase() === targetIdOrMbti.toUpperCase()
+    );
+    if (!matched) return;
+    haptic('selection');
+    setPersonaId(matched.id);
+    if (!matched.featured) setShowAllPersonas(true);
+    if (suggestedMatIds && suggestedMatIds.length > 0) {
+      const validIds = new Set(accessories.map((a) => a.id));
+      const clean = suggestedMatIds.filter((id) => validIds.has(id)).slice(0, 6);
+      if (clean.length > 0) setSelectedAccessories(clean);
+    }
+    idemKeyRef.current = generateIdempotencyKey('card');
+  };
+
+  const handleRunPhotoRecommend = async () => {
+    if (recommending) return;
+    setRecommendError(null);
+    if (!photoFile) {
+      setRecommendError('请先在第 1 步上传或拍摄一张自拍，再使用 AI 气质分析。');
+      return;
+    }
+
+    haptic('medium');
+    setRecommending(true);
+    try {
+      const res = await api.recommendMbti({
+        photo: photoFile,
+      });
+      setRecommendation(res);
+      applyPersonaSelection(res.primaryPersonaId, res.suggestedMaterialIds);
+      haptic('success');
+    } catch (err) {
+      setRecommendError(err instanceof Error ? err.message : '人格推荐分析失败，请稍后重试');
+    } finally {
+      setRecommending(false);
+    }
+  };
+
   const toggleAccessory = (id: string) => {
     haptic('selection');
     setSelectedAccessories((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : prev.length < 4 ? [...prev, id] : prev
+      prev.includes(id) ? prev.filter((x) => x !== id) : prev.length < 6 ? [...prev, id] : prev
     );
     idemKeyRef.current = generateIdempotencyKey('card');
+  };
+
+  const applyRecommendedMaterials = () => {
+    if (!activePersona) return;
+    const validIds = new Set(accessories.map((a) => a.id));
+    const rec = (activePersona.recommendedMaterials ?? []).filter((id) => validIds.has(id));
+    if (rec.length > 0) {
+      haptic('success');
+      setSelectedAccessories(rec.slice(0, 6));
+      idemKeyRef.current = generateIdempotencyKey('card');
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -209,6 +318,24 @@ export function CreatePage() {
   const visiblePersonas = showAllPersonas ? personas : featuredPersonas;
   const activePersona = personas.find((p) => p.id === personaId);
   const step1Done = Boolean(photoFile && userNickname.trim());
+
+  const groupedMaterials = useMemo(() => {
+    const groups = new Map<MaterialCategory, AccessoryOption[]>();
+    for (const cat of CATEGORY_ORDER) {
+      groups.set(cat, []);
+    }
+    for (const item of accessories) {
+      const cat = (item.category || 'hardware_charm') as MaterialCategory;
+      const list = groups.get(cat) ?? [];
+      list.push(item);
+      groups.set(cat, list);
+    }
+    return CATEGORY_ORDER.map((cat) => ({
+      category: cat,
+      label: CATEGORY_LABELS[cat],
+      items: groups.get(cat) ?? [],
+    })).filter((g) => g.items.length > 0);
+  }, [accessories]);
 
   const renderPhotoAndNickname = () => (
     <div className="space-y-4">
@@ -356,7 +483,7 @@ export function CreatePage() {
                 点击上传参考照片
               </p>
               <p className="text-[11px] text-[#8E7C6E]">
-                支持 JPEG/PNG/WebP · 仅用于水彩形象，24h 自动清理
+                支持 JPEG/PNG/WebP · 仅用于水彩形象与气质匹配，24h 自动清理
               </p>
             </div>
           </div>
@@ -395,136 +522,263 @@ export function CreatePage() {
   );
 
   const renderPersonaStep = () => (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
+    <div className="space-y-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-baseline gap-2">
           <span className="font-atelier-num italic text-[14px] text-[#4A8276]">02.</span>
           <h2 className="font-editorial text-base font-semibold text-[#382A22]">
-            角色人格（16 型 MBTI）
+            角色人格（AI 荣格八维引导 / 16 型直选）
           </h2>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            haptic('selection');
-            setShowAllPersonas((v) => !v);
-          }}
-          className="text-xs font-medium btn-icon-ghost text-[#4A8276] whitespace-nowrap"
-        >
-          {showAllPersonas ? '收起为精选 4 型' : `全部 ${personas.length} 型`}
-        </button>
+
+        {/* Mode Switcher: AI Guided Interview vs Direct 16-MBTI Picker */}
+        <div className="inline-flex items-center rounded-xl bg-[#F2ECE2] p-0.5 border border-[#E5DCCD]">
+          <button
+            type="button"
+            onClick={() => {
+              haptic('selection');
+              setPersonaMode('ai_guide');
+            }}
+            className={`px-2.5 py-1 text-[11.5px] font-medium rounded-lg transition-colors whitespace-nowrap ${
+              personaMode === 'ai_guide'
+                ? 'bg-white text-[#2C6155] shadow-xs'
+                : 'text-[#7D6C5F] hover:text-[#382A22]'
+            }`}
+          >
+            AI 引导测评
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              haptic('selection');
+              setPersonaMode('manual');
+            }}
+            className={`px-2.5 py-1 text-[11.5px] font-medium rounded-lg transition-colors whitespace-nowrap ${
+              personaMode === 'manual'
+                ? 'bg-white text-[#2C6155] shadow-xs'
+                : 'text-[#7D6C5F] hover:text-[#382A22]'
+            }`}
+          >
+            直接选 16 型
+          </button>
+        </div>
       </div>
 
-      {loadingInit ? (
-        <WatercolorPersonaGridSkeleton count={4} />
-      ) : (
-        <div
-          className={`grid gap-2.5 ${
-            showAllPersonas ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-2'
-          }`}
-        >
-          {visiblePersonas.map((p) => {
-            const selected = p.id === personaId;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                data-pressable="card"
-                onClick={() => {
-                  haptic('selection');
-                  setPersonaId(p.id);
-                  idemKeyRef.current = generateIdempotencyKey('card');
-                }}
-                className={`text-left rounded-2xl border transition-all ${
-                  showAllPersonas ? 'p-2.5' : 'p-3.5'
-                } ${
-                  selected
-                    ? 'border-[#4A8276] specimen-stage-0 shadow-[0_6px_18px_-8px_rgba(74,130,118,0.3)]'
-                    : 'border-[#E8DFD2] bg-[#FFFDF9] hover:border-[#CFC4B5]'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-[11px] font-mono font-semibold text-[#3D7267]">
-                    {p.mbti}
-                  </span>
-                  {selected && <Check className="w-3.5 h-3.5 text-[#3D7267]" strokeWidth={2.4} />}
+      {/* Mode A: High-Accuracy AI Jungian 8-Function Adaptive Interview (kept mounted when active) */}
+      <div className={personaMode === 'ai_guide' ? 'block space-y-3' : 'hidden'}>
+        <MbtiAiGuidePanel onApplyPersona={applyPersonaSelection} />
+      </div>
+
+      {/* Mode B: Direct 16-MBTI Picker + Optional Selfie Analysis */}
+      {personaMode === 'manual' && (
+        <div className="space-y-3.5">
+          <div className="p-3 rounded-2xl bg-[#F7F3EB]/90 border border-[#E6DDD0] space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-[#382A22]">
+                <Wand2 className="w-3.5 h-3.5 text-[#4A8276]" />
+                <span>已知 MBTI 可直接点选，或参考自拍气质</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={recommending || !photoFile}
+                  onClick={() => void handleRunPhotoRecommend()}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11.5px] font-medium btn-ink-tinted disabled:opacity-45 whitespace-nowrap"
+                >
+                  <Sparkles className="w-3 h-3 text-[#4A8276]" />
+                  <span>{recommending ? '分析中…' : 'AI 看自拍参考'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    haptic('selection');
+                    setShowAllPersonas((v) => !v);
+                  }}
+                  className="text-xs font-medium btn-icon-ghost text-[#4A8276] whitespace-nowrap"
+                >
+                  {showAllPersonas ? '收起精选 4 型' : `全部 ${personas.length} 型`}
+                </button>
+              </div>
+            </div>
+
+            {recommendError && (
+              <p className="text-[11.5px] text-[#9E3D2E] bg-[#FDF2F0] border border-[#E5B8B0] rounded-lg px-2.5 py-1.5">
+                {recommendError}
+              </p>
+            )}
+
+            {recommendation && (
+              <div className="p-3 rounded-xl bg-[#FFFDF9] border border-[#C6E1D9] space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-mono font-bold text-[#2D6458] bg-[#E8F4F0] px-2 py-0.5 rounded-md">
+                      自拍推荐 {recommendation.primaryMbti}
+                    </span>
+                    {recommendation.keywords.map((kw) => (
+                      <span
+                        key={kw}
+                        className="text-[11px] text-[#6E5C50] bg-[#F7F2E8] px-2 py-0.5 rounded-md"
+                      >
+                        {kw}
+                      </span>
+                    ))}
+                  </div>
+                  {recommendation.alternateMbtis.length > 0 && (
+                    <div className="flex items-center gap-1 text-[11px] text-[#8E7C6E]">
+                      <span>备选:</span>
+                      {recommendation.alternateMbtis.map((alt) => (
+                        <button
+                          key={alt}
+                          type="button"
+                          onClick={() => applyPersonaSelection(alt)}
+                          className="font-mono text-[#4A8276] hover:underline px-1"
+                        >
+                          {alt}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <div className="font-editorial text-[13.5px] font-semibold text-[#382A22] mt-0.5 truncate">
-                  {p.name}
-                </div>
-                {!showAllPersonas && (
-                  <p className="text-[11px] text-[#6E5C50] mt-1 line-clamp-2 leading-snug">
-                    {p.tagline}
-                  </p>
-                )}
-              </button>
-            );
-          })}
+                <p className="text-[11.5px] text-[#524339] leading-relaxed">{recommendation.reason}</p>
+              </div>
+            )}
+          </div>
+
+          {loadingInit ? (
+            <WatercolorPersonaGridSkeleton count={4} />
+          ) : (
+            <div
+              className={`grid gap-2.5 ${
+                showAllPersonas ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-2'
+              }`}
+            >
+              {visiblePersonas.map((p) => {
+                const selected = p.id === personaId;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    data-pressable="card"
+                    onClick={() => applyPersonaSelection(p.id)}
+                    className={`text-left rounded-2xl border transition-all ${
+                      showAllPersonas ? 'p-2.5' : 'p-3.5'
+                    } ${
+                      selected
+                        ? 'border-[#4A8276] specimen-stage-0 shadow-[0_6px_18px_-8px_rgba(74,130,118,0.3)]'
+                        : 'border-[#E8DFD2] bg-[#FFFDF9] hover:border-[#CFC4B5]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[11px] font-mono font-semibold text-[#3D7267]">
+                        {p.mbti}
+                      </span>
+                      {selected && <Check className="w-3.5 h-3.5 text-[#3D7267]" strokeWidth={2.4} />}
+                    </div>
+                    <div className="font-editorial text-[13.5px] font-semibold text-[#382A22] mt-0.5 truncate">
+                      {p.name}
+                    </div>
+                    {!showAllPersonas && (
+                      <p className="text-[11px] text-[#6E5C50] mt-1 line-clamp-2 leading-snug">
+                        {p.tagline}
+                      </p>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
       {activePersona && (
-        <blockquote className="atelier-pullquote px-3.5 py-2.5 text-[12px] text-[#6E5C50] leading-relaxed">
-          <span className="font-medium text-[#382A22]">{activePersona.mbti} 开场白：</span>
-          “{activePersona.openingLine}”
-        </blockquote>
+        <div className="space-y-2">
+          <blockquote className="atelier-pullquote px-3.5 py-2.5 text-[12px] text-[#6E5C50] leading-relaxed">
+            <span className="font-medium text-[#382A22]">
+              当前已选 {activePersona.mbti} · {activePersona.name} 开场白：
+            </span>
+            “{activePersona.openingLine}”
+          </blockquote>
+          {activePersona.cognitiveAxis && (
+            <div className="px-3 py-2 rounded-xl studio-inset text-[11px] text-[#6E5C50] flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="font-mono text-[#3D7267] font-medium">
+                {activePersona.cognitiveAxis}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className="line-clamp-1">{activePersona.materialHint}</span>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
 
   const renderAccessoriesStep = () => (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
+    <div className="space-y-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-baseline gap-2">
           <span className="font-atelier-num italic text-[14px] text-[#4A8276]">03.</span>
           <h2 className="font-editorial text-base font-semibold text-[#382A22]">
-            手作配饰（最多 4 项）
+            在库手作材料（最多 6 项）
           </h2>
         </div>
-        <span className="text-xs font-mono tabular-nums text-[#4A8276] font-medium">
-          已选 {selectedAccessories.length} / 4
-        </span>
+        <div className="flex items-center gap-2.5">
+          {activePersona && (activePersona.recommendedMaterials?.length ?? 0) > 0 && (
+            <button
+              type="button"
+              onClick={applyRecommendedMaterials}
+              className="text-[11.5px] font-medium text-[#4A8276] hover:underline whitespace-nowrap"
+            >
+              套用 {activePersona.mbti} 推荐搭配
+            </button>
+          )}
+          <span className="text-xs font-mono tabular-nums text-[#4A8276] font-medium">
+            已选 {selectedAccessories.length} / 6
+          </span>
+        </div>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        {accessories.map((acc, idx) => {
-          const picked = selectedAccessories.includes(acc.id);
-          const swatchColors = [
-            '#C9963B',
-            '#639A8C',
-            '#C97A6A',
-            '#9A85B4',
-            '#B38B63',
-            '#5B8B7E',
-            '#D4A95B',
-            '#8E6C52',
-          ];
-          const swatch = swatchColors[idx % swatchColors.length];
-          return (
-            <button
-              key={acc.id}
-              type="button"
-              data-pressable="card"
-              onClick={() => toggleAccessory(acc.id)}
-              className={`inline-flex items-center gap-2 pl-2.5 pr-3.5 py-2 rounded-full border text-left transition-all ${
-                picked
-                  ? 'border-[#4A8276] bg-[#EAF5F1] text-[#26544A] shadow-[0_2px_8px_-2px_rgba(74,130,118,0.22)]'
-                  : 'border-[#E6DDD0] bg-[#FFFEFC] hover:border-[#CFC4B5] text-[#382A22]'
-              }`}
-            >
-              <span
-                className="w-2.5 h-2.5 rounded-full shrink-0 ring-1 ring-black/10"
-                style={{ backgroundColor: swatch }}
-                aria-hidden="true"
-              />
-              <span className="text-[12px] font-medium whitespace-nowrap">{acc.label}</span>
-              <span className="text-[10.5px] text-[#9A887B] whitespace-nowrap">
-                {acc.material}
-              </span>
-              {picked && <Check className="w-3.5 h-3.5 shrink-0 text-[#4A8276]" strokeWidth={2.4} />}
-            </button>
-          );
-        })}
+      <p className="text-[11.5px] text-[#8E7C6E] leading-relaxed">
+        以下均来自工坊当前在库材料清单，Google Nano 生图会严格贴合所选实材，方便线下手工复刻。
+      </p>
+
+      <div className="space-y-3 max-h-[340px] lg:max-h-[370px] overflow-y-auto pr-1">
+        {groupedMaterials.map((group) => (
+          <div key={group.category} className="space-y-1.5">
+            <div className="text-[11px] font-medium text-[#8E7C6E] tracking-wide">
+              {group.label}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {group.items.map((acc) => {
+                const picked = selectedAccessories.includes(acc.id);
+                const isRecommended = activePersona?.recommendedMaterials?.includes(acc.id);
+                return (
+                  <button
+                    key={acc.id}
+                    type="button"
+                    data-pressable="card"
+                    onClick={() => toggleAccessory(acc.id)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-left transition-all ${
+                      picked
+                        ? 'border-[#4A8276] bg-[#EAF5F1] text-[#26544A] shadow-[0_2px_8px_-2px_rgba(74,130,118,0.22)]'
+                        : 'border-[#E6DDD0] bg-[#FFFEFC] hover:border-[#CFC4B5] text-[#382A22]'
+                    }`}
+                  >
+                    <span className="text-[12px] font-medium whitespace-nowrap">{acc.label}</span>
+                    <span className="text-[10.5px] text-[#9A887B] whitespace-nowrap">
+                      {acc.material}
+                    </span>
+                    {isRecommended && !picked && (
+                      <span className="text-[10px] text-[#C9963B] font-medium">荐</span>
+                    )}
+                    {picked && (
+                      <Check className="w-3.5 h-3.5 shrink-0 text-[#4A8276]" strokeWidth={2.4} />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* Compact Configuration Summary */}
@@ -543,6 +797,10 @@ export function CreatePage() {
         <span>
           人格：<strong className="font-mono text-[#4A8276]">{activePersona?.mbti || '-'}</strong>
         </span>
+        <span aria-hidden="true">·</span>
+        <span>
+          材料：<strong className="text-[#382A22]">{selectedAccessories.length} 项</strong>
+        </span>
       </div>
     </div>
   );
@@ -555,7 +813,7 @@ export function CreatePage() {
           [
             { key: 1 as const, label: '1 照片称呼', done: step1Done },
             { key: 2 as const, label: '2 人格设定', done: Boolean(activePersona) },
-            { key: 3 as const, label: '3 配饰生成', done: selectedAccessories.length > 0 },
+            { key: 3 as const, label: '3 材料生成', done: selectedAccessories.length > 0 },
           ] as const
         ).map((item) => {
           const active = step === item.key;
@@ -590,145 +848,133 @@ export function CreatePage() {
       </div>
 
       <form onSubmit={handleSubmit}>
-        {/* Mobile One-Screen Step Card (lg:hidden) */}
-        <div className="lg:hidden studio-card rounded-[20px] p-4 space-y-4">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={step}
-              initial={{ opacity: 0, x: 8 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -8 }}
-              transition={{ duration: 0.2, ease: EASE_STUDIO }}
-            >
-              {step === 1 && renderPhotoAndNickname()}
-              {step === 2 && renderPersonaStep()}
-              {step === 3 && renderAccessoriesStep()}
-            </motion.div>
-          </AnimatePresence>
+        {/* Mobile One-Screen Step Card (rendered only on <1024px so AI Guide mounts once & preserves progress) */}
+        {!isDesktop && (
+          <div className="studio-card rounded-[20px] p-4 space-y-4">
+            <div className={step === 1 ? 'block' : 'hidden'}>{renderPhotoAndNickname()}</div>
+            <div className={step === 2 ? 'block' : 'hidden'}>{renderPersonaStep()}</div>
+            <div className={step === 3 ? 'block' : 'hidden'}>{renderAccessoriesStep()}</div>
 
-          {submitError && (
-            <div className="p-3 rounded-xl border border-[#E5B8B0] bg-[#FDF2F0] text-xs text-[#9E3D2E]">
-              {submitError}
-            </div>
-          )}
-
-          {/* Step Footer Controls — Clearly Differentiated Shapes & Weight */}
-          <div className="pt-3 border-t border-[#EFE7DC] flex items-center justify-between gap-2.5">
-            {step > 1 ? (
-              <button
-                type="button"
-                onClick={() => {
-                  haptic('selection');
-                  setStep((s) => (s > 1 ? ((s - 1) as WizardStep) : s));
-                }}
-                className="inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium btn-paper-soft whitespace-nowrap"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>上一步</span>
-              </button>
-            ) : (
-              <span className="text-[11px] text-[#9A887B]">共 3 步 · 约 20 秒</span>
-            )}
-
-            {step < 3 ? (
-              <button
-                type="button"
-                onClick={() => {
-                  haptic('light');
-                  setStep((s) => (s < 3 ? ((s + 1) as WizardStep) : s));
-                }}
-                className="inline-flex items-center justify-center gap-1.5 px-5 py-2.5 text-[13px] font-medium btn-ink-tinted whitespace-nowrap"
-              >
-                <span>{step === 1 ? '下一步 · 选人格' : '下一步 · 配饰'}</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
-            ) : (
-              <button
-                type="submit"
-                disabled={submitting || !photoFile || !userNickname.trim()}
-                className="flex-1 inline-flex items-center justify-center px-5 py-2.5 text-sm font-medium btn-capsule-primary whitespace-nowrap"
-              >
-                {submitting ? '正在创建绘制任务…' : '开始生成角色形象'}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Desktop Compact Single-Screen 2-Column Studio (hidden lg:grid) */}
-        <div className="hidden lg:grid lg:grid-cols-12 gap-6 items-start">
-          <section className="lg:col-span-5 studio-card rounded-[20px] p-6 space-y-5">
-            {renderPhotoAndNickname()}
             {submitError && (
               <div className="p-3 rounded-xl border border-[#E5B8B0] bg-[#FDF2F0] text-xs text-[#9E3D2E]">
                 {submitError}
               </div>
             )}
-            <button
-              type="submit"
-              disabled={submitting || !photoFile || !userNickname.trim()}
-              className="w-full inline-flex items-center justify-center px-6 py-3 text-sm font-medium btn-capsule-primary whitespace-nowrap"
-            >
-              {submitting ? '正在创建绘制任务…' : '开始生成角色形象'}
-            </button>
-          </section>
 
-          <section className="lg:col-span-7 studio-card rounded-[20px] p-6 space-y-5">
-            <div className="flex items-center justify-between gap-4 border-b border-[#EFE7DC] pb-4">
-              <div>
-                <h1 className="font-editorial text-xl font-semibold text-[#382A22]">
-                  定制专属果壳娃娃
-                </h1>
-                <p className="text-xs text-[#9A887B] mt-0.5">
-                  人格与手作配饰均由你指定，初次生成后支持最多 2 次重生成。
-                </p>
-              </div>
-              <div className="ios-segmented grid grid-cols-2 w-[230px] shrink-0">
-                {(
-                  [
-                    { key: 'persona', label: `人格 (${activePersona?.mbti || 'MBTI'})` },
-                    { key: 'accessories', label: `配饰 (${selectedAccessories.length}/4)` },
-                  ] as const
-                ).map((t) => {
-                  const active = desktopRightTab === t.key;
-                  return (
-                    <button
-                      key={t.key}
-                      type="button"
-                      onClick={() => {
-                        haptic('selection');
-                        setDesktopRightTab(t.key);
-                      }}
-                      className={`relative py-1.5 px-2.5 text-xs font-medium rounded-[10px] transition-colors whitespace-nowrap ${
-                        active ? 'text-[#382A22]' : 'text-[#7D6C5F]'
-                      }`}
-                    >
-                      {active && (
-                        <motion.span
-                          layoutId="desktop-create-tab"
-                          transition={{ type: 'spring', stiffness: 460, damping: 34 }}
-                          className="absolute inset-0 ios-segmented-thumb"
-                        />
-                      )}
-                      <span className="relative z-10">{t.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
+            <div className="pt-3 border-t border-[#EFE7DC] flex items-center justify-between gap-2.5">
+              {step > 1 ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    haptic('selection');
+                    setStep((s) => (s > 1 ? ((s - 1) as WizardStep) : s));
+                  }}
+                  className="inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium btn-paper-soft whitespace-nowrap"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>上一步</span>
+                </button>
+              ) : (
+                <span className="text-[11px] text-[#9A887B]">共 3 步 · AI 精准引导</span>
+              )}
+
+              {step < 3 ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    haptic('light');
+                    setStep((s) => (s < 3 ? ((s + 1) as WizardStep) : s));
+                  }}
+                  className="inline-flex items-center justify-center gap-1.5 px-5 py-2.5 text-[13px] font-medium btn-ink-tinted whitespace-nowrap"
+                >
+                  <span>{step === 1 ? '下一步 · AI 测人格' : '下一步 · 挑材料'}</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={submitting || !photoFile || !userNickname.trim()}
+                  className="flex-1 inline-flex items-center justify-center px-5 py-2.5 text-sm font-medium btn-capsule-primary whitespace-nowrap"
+                >
+                  {submitting ? '正在创建绘制任务…' : '开始生成果壳形象'}
+                </button>
+              )}
             </div>
+          </div>
+        )}
 
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={desktopRightTab}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.18, ease: EASE_STUDIO }}
+        {/* Desktop Compact Single-Screen 2-Column Studio (rendered only on >=1024px) */}
+        {isDesktop && (
+          <div className="grid grid-cols-12 gap-6 items-start">
+            <section className="col-span-5 studio-card rounded-[20px] p-6 space-y-5">
+              {renderPhotoAndNickname()}
+              {submitError && (
+                <div className="p-3 rounded-xl border border-[#E5B8B0] bg-[#FDF2F0] text-xs text-[#9E3D2E]">
+                  {submitError}
+                </div>
+              )}
+              <button
+                type="submit"
+                disabled={submitting || !photoFile || !userNickname.trim()}
+                className="w-full inline-flex items-center justify-center px-6 py-3 text-sm font-medium btn-capsule-primary whitespace-nowrap"
               >
-                {desktopRightTab === 'persona' ? renderPersonaStep() : renderAccessoriesStep()}
-              </motion.div>
-            </AnimatePresence>
-          </section>
-        </div>
+                {submitting ? '正在创建绘制任务…' : '开始生成果壳形象'}
+              </button>
+            </section>
+
+            <section className="col-span-7 studio-card rounded-[20px] p-6 space-y-5">
+              <div className="flex items-center justify-between gap-4 border-b border-[#EFE7DC] pb-4">
+                <div>
+                  <h1 className="font-editorial text-xl font-semibold text-[#382A22]">
+                    定制专属果壳娃娃
+                  </h1>
+                  <p className="text-xs text-[#9A887B] mt-0.5">
+                    采用荣格八维自适应 AI 访谈精准定型 MBTI，并严格贴合工坊在库材料生成。
+                  </p>
+                </div>
+                <div className="ios-segmented grid grid-cols-2 w-[240px] shrink-0">
+                  {(
+                    [
+                      { key: 'persona', label: `人格 (${activePersona?.mbti || 'MBTI'})` },
+                      { key: 'accessories', label: `材料 (${selectedAccessories.length}/6)` },
+                    ] as const
+                  ).map((t) => {
+                    const active = desktopRightTab === t.key;
+                    return (
+                      <button
+                        key={t.key}
+                        type="button"
+                        onClick={() => {
+                          haptic('selection');
+                          setDesktopRightTab(t.key);
+                        }}
+                        className={`relative py-1.5 px-2.5 text-xs font-medium rounded-[10px] transition-colors whitespace-nowrap ${
+                          active ? 'text-[#382A22]' : 'text-[#7D6C5F]'
+                        }`}
+                      >
+                        {active && (
+                          <motion.span
+                            layoutId="desktop-create-tab"
+                            transition={{ type: 'spring', stiffness: 460, damping: 34 }}
+                            className="absolute inset-0 ios-segmented-thumb"
+                          />
+                        )}
+                        <span className="relative z-10">{t.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className={desktopRightTab === 'persona' ? 'block' : 'hidden'}>
+                {renderPersonaStep()}
+              </div>
+              <div className={desktopRightTab === 'accessories' ? 'block' : 'hidden'}>
+                {renderAccessoriesStep()}
+              </div>
+            </section>
+          </div>
+        )}
       </form>
     </div>
   );

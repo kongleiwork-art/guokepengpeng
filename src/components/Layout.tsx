@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
 import {
+  BookOpen,
   Bookmark,
   ChevronLeft,
   Compass,
@@ -18,6 +19,7 @@ interface LayoutProps {
 
 const NAV_ITEMS = [
   { label: '展馆', to: '/', icon: Compass, kind: 'standard' as const },
+  { label: '图鉴', to: '/plaza', icon: BookOpen, kind: 'standard' as const },
   { label: '定制', to: '/create', icon: Plus, kind: 'create' as const },
   { label: '收藏', to: '/works', icon: Bookmark, kind: 'standard' as const },
   { label: '控制台', to: '/dev', icon: SlidersHorizontal, kind: 'utility' as const },
@@ -33,6 +35,9 @@ function getRouteMeta(pathname: string): {
   if (pathname === '/') {
     return { isRootTab: true, title: '果壳碰碰', backTo: '/', backLabel: '', hideBottomTab: false };
   }
+  if (pathname === '/plaza') {
+    return { isRootTab: true, title: '人格图鉴', backTo: '/', backLabel: '', hideBottomTab: false };
+  }
   if (pathname === '/create') {
     return { isRootTab: true, title: '定制角色', backTo: '/', backLabel: '', hideBottomTab: false };
   }
@@ -41,6 +46,9 @@ function getRouteMeta(pathname: string): {
   }
   if (pathname === '/dev') {
     return { isRootTab: true, title: '控制台', backTo: '/', backLabel: '', hideBottomTab: false };
+  }
+  if (pathname.startsWith('/nfc/')) {
+    return { isRootTab: false, title: 'NFC 唤醒', backTo: '/', backLabel: '展馆', hideBottomTab: false };
   }
   if (pathname.startsWith('/d/') && pathname.endsWith('/chat')) {
     const dollId = pathname.split('/')[2] || '';
@@ -256,9 +264,9 @@ export function Layout({ children }: LayoutProps) {
         <div className="fixed bottom-0 inset-x-0 md:bottom-4 z-40 pointer-events-none flex justify-center">
           <nav
             aria-label="底部导航"
-            className="pointer-events-auto w-full md:w-auto md:min-w-[404px] ios-tab-bar md:rounded-full"
+            className="pointer-events-auto w-full md:w-auto md:min-w-[468px] ios-tab-bar md:rounded-full"
           >
-            <div className="grid grid-cols-4 items-center h-[60px] md:h-[64px] max-w-lg mx-auto px-2 md:px-3.5 gap-1">
+            <div className="grid grid-cols-5 items-center h-[60px] md:h-[64px] max-w-lg mx-auto px-1.5 md:px-3.5 gap-0.5">
               {NAV_ITEMS.map((item) => {
                 const active = isActive(item.to);
                 const Icon = item.icon;

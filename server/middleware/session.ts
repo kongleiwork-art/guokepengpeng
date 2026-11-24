@@ -6,6 +6,7 @@ import { db } from '../db.ts';
 export interface SessionRecord {
   id: string;
   isDemo: boolean;
+  visitorKey: string | null;
   createdAt: string;
   expiresAt: string;
 }
@@ -71,6 +72,13 @@ function verifySignedSessionCookie(raw: string | undefined): string | null {
   return sid;
 }
 
+export function extractVisitorKey(req: Request): string | null {
+  const raw = (req.get('x-visitor-key') || '').trim();
+  if (!raw || raw.length < 12 || raw.length > 80) return null;
+  if (!/^[a-zA-Z0-9_-]+$/.test(raw)) return null;
+  return raw;
+}
+
 function isRequestHttps(req: Request): boolean {
   const proto = req.get('x-forwarded-proto');
   if (proto) return proto.split(',')[0].trim() === 'https';
@@ -98,55 +106,122 @@ export function clearSessionCookie(req: Request, res: Response): void {
   });
 }
 
-export function loadExistingSession(req: Request): SessionRecord | null {
-  const raw = req.cookies?.[config.sessionCookieName];
-  const sid = verifySignedSessionCookie(raw);
-  if (!sid) return null;
-
-  const row = db
-    .prepare(
-      `SELECT id, is_demo, invalidated, created_at, expires_at
-       FROM sessions
-       WHERE id = ?`
-    )
-    .get(sid) as
-    | { id: string; is_demo: number; invalidated: number; created_at: string; expires_at: string }
-    | undefined;
-
+function mapSessionRow(row: {
+  id: string;
+  is_demo: number;
+  invalidated: number;
+  visitor_key?: string | null;
+  created_at: string;
+  expires_at: string;
+} | undefined): SessionRecord | null {
   if (!row || row.invalidated === 1) return null;
   if (new Date(row.expires_at).getTime() <= Date.now()) return null;
-
   return {
     id: row.id,
     isDemo: row.is_demo === 1,
+    visitorKey: row.visitor_key ?? null,
     createdAt: row.created_at,
     expiresAt: row.expires_at,
   };
 }
 
-export function createNewSession(): SessionRecord {
+export function loadSessionById(sessionId: string): SessionRecord | null {
+  const row = db
+    .prepare(
+      `SELECT id, is_demo, invalidated, visitor_key, created_at, expires_at
+       FROM sessions
+       WHERE id = ?`
+    )
+    .get(sessionId) as
+    | {
+        id: string;
+        is_demo: number;
+        invalidated: number;
+        visitor_key: string | null;
+        created_at: string;
+        expires_at: string;
+      }
+    | undefined;
+  return mapSessionRow(row);
+}
+
+/**
+ * Dual-track session resolution for reliable NFC re-taps across Safari / Chrome / WeChat:
+ * 1) Signed HttpOnly cookie (primary)
+ * 2) Persistent X-Visitor-Key header fallback when mobile browsers isolate cookies between NFC taps
+ */
+export function loadExistingSession(req: Request): SessionRecord | null {
+  const raw = req.cookies?.[config.sessionCookieName];
+  const sid = verifySignedSessionCookie(raw);
+  const visitorKey = extractVisitorKey(req);
+
+  if (sid) {
+    const cookieSess = loadSessionById(sid);
+    if (cookieSess) {
+      if (visitorKey && !cookieSess.visitorKey) {
+        db.prepare(`UPDATE sessions SET visitor_key = ? WHERE id = ?`).run(visitorKey, cookieSess.id);
+        cookieSess.visitorKey = visitorKey;
+      }
+      return cookieSess;
+    }
+  }
+
+  if (visitorKey) {
+    const row = db
+      .prepare(
+        `SELECT id, is_demo, invalidated, visitor_key, created_at, expires_at
+         FROM sessions
+         WHERE visitor_key = ? AND invalidated = 0
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get(visitorKey) as
+      | {
+          id: string;
+          is_demo: number;
+          invalidated: number;
+          visitor_key: string | null;
+          created_at: string;
+          expires_at: string;
+        }
+      | undefined;
+    const restored = mapSessionRow(row);
+    if (restored) {
+      return restored;
+    }
+  }
+
+  return null;
+}
+
+export function createNewSession(visitorKey?: string | null): SessionRecord {
   const id = `sess_${crypto.randomBytes(12).toString('hex')}`;
   const now = new Date();
   const expires = new Date(now.getTime() + config.sessionTtlDays * 24 * 60 * 60 * 1000);
   const record: SessionRecord = {
     id,
     isDemo: true,
+    visitorKey: visitorKey ?? null,
     createdAt: now.toISOString(),
     expiresAt: expires.toISOString(),
   };
 
   db.prepare(
-    `INSERT INTO sessions (id, is_demo, invalidated, created_at, expires_at)
-     VALUES (?, 1, 0, ?, ?)`
-  ).run(record.id, record.createdAt, record.expiresAt);
+    `INSERT INTO sessions (id, is_demo, invalidated, visitor_key, created_at, expires_at)
+     VALUES (?, 1, 0, ?, ?, ?)`
+  ).run(record.id, record.visitorKey, record.createdAt, record.expiresAt);
 
   return record;
 }
 
 export function ensureSession(req: Request, res: Response, next: NextFunction): void {
+  const visitorKey = extractVisitorKey(req);
   let session = loadExistingSession(req);
   if (!session) {
-    session = createNewSession();
+    session = createNewSession(visitorKey);
+    setSessionCookie(req, res, session);
+  } else if (!req.cookies?.[config.sessionCookieName]) {
+    // Re-hydrate HttpOnly cookie if restored via visitor key
     setSessionCookie(req, res, session);
   }
   req.session = session;
