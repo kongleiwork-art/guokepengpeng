@@ -1,12 +1,13 @@
 import crypto from 'node:crypto';
 import { config } from '../config.ts';
 import { db, getMaterialsByIds, getRuntimeSettings, recordRunLog, type RuntimeSettings } from '../db.ts';
-import { getImageProvider } from '../providers/imageProvider.ts';
+import { getImageProvider, type DollBrief } from '../providers/imageProvider.ts';
 import { getOutputProvider } from '../providers/outputProvider.ts';
 import { deleteMedia, readMedia } from '../mediaStore.ts';
 import { publishTask, type Task } from './taskQueue.ts';
 
-export type ImageSettings = Pick<RuntimeSettings, 'imageVendor' | 'imageModel' | 'imageModelTier' | 'strictMaterialConstraint'>;
+export type ImageSettings = Pick<RuntimeSettings, 'imageVendor' | 'imageModel' | 'imageModelTier' | 'strictMaterialConstraint'> &
+  DollBrief;
 
 interface QueuedVersionRow {
   id: string;
@@ -38,9 +39,9 @@ interface QueuedOutputJobRow {
 }
 
 export function snapshotImageSettings({
-  imageVendor, imageModel, imageModelTier, strictMaterialConstraint,
+  imageVendor, imageModel, imageModelTier, strictMaterialConstraint, photoStyle, dollDesign,
 }: ImageSettings): string {
-  return JSON.stringify({ imageVendor, imageModel, imageModelTier, strictMaterialConstraint });
+  return JSON.stringify({ imageVendor, imageModel, imageModelTier, strictMaterialConstraint, photoStyle, dollDesign });
 }
 
 async function enqueueTask(kind: 'image' | 'output', id: string): Promise<void> {
@@ -172,6 +173,8 @@ async function processImageVersion(versionId: string): Promise<void> {
         personaMbti: row.persona_mbti,
         personaMaterialHint: row.persona_material_hint,
         personaVisualTrait: row.persona_visual_trait,
+        photoStyle: runtimeSettings.photoStyle,
+        dollDesign: runtimeSettings.dollDesign,
         accessoryIds,
         selectedMaterials,
         strictMaterialConstraint: runtimeSettings.strictMaterialConstraint,

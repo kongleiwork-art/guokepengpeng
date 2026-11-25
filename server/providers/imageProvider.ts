@@ -14,7 +14,12 @@ import type { MaterialRecord } from '../db.ts';
 import { inspectImageBuffer } from '../utils/imageValidation.ts';
 import { writeMedia } from '../mediaStore.ts';
 
-export interface ImageGenerateInput {
+export interface DollBrief {
+  photoStyle?: string;
+  dollDesign?: string;
+}
+
+export interface ImageGenerateInput extends DollBrief {
   cardId: string;
   versionId: string;
   versionNumber: number;
@@ -72,8 +77,13 @@ export function buildDollImagePrompt(input: ImageGenerateInput): string {
     'Selected Real Craft Workshop Materials to Render Faithfully:',
     matLines,
     strictRules,
+    input.photoStyle || input.dollDesign
+      ? 'Use the following studio notes as visual inspiration. Follow the selected doll role and available materials when adapting these notes.'
+      : '',
+    input.photoStyle ? `Reference photo palette and styling notes: ${input.photoStyle}` : '',
+    input.dollDesign ? `Prepared miniature doll design notes: ${input.dollDesign}` : '',
     'Art direction: visible delicate watercolor washes, fine colored-pencil stitch lines, tiny glossy dark bead eyes, gentle coral-peach rosy cheeks, soft grounded watercolor shadow beneath feet, pure crisp white background, single centered full-body doll, zero text, zero letters, zero watermark.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function resolveLocalAssetFile(urlPath: string): { absPath: string; mime: string } | null {

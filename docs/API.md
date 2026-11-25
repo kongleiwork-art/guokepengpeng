@@ -97,6 +97,7 @@ data: {"code":"CHAT_TIMEOUT","message":"对话首字响应超过 10000ms 超时�
 - `GET /api/cards` (`session`) → `200` 返回当前会话创建的全部作品卡片。
 - `POST /api/cards` (`session`, `multipart/form-data`, `Idempotency-Key`)
   - 字段：`photo`（JPEG/PNG/WebP，二进制头校验且 ≤ 2 MB）、`userNickname`、`personaId`、可选 `accessoryIds`。
+  - 可选 `photoStyle` 和 `dollDesign`，最多 120 和 180 个字符。文本随任务快照保存，重生成时沿用原方案。
   - 返回 `202 { cardId, versionId, status: "queued", provider, cardUrl, processingUrl }`。
 - `GET /api/cards/:id` (`owner`) → `200` 返回卡片详情、全部 `versions`、`activeVersionId`、`remainingAttempts`、`boundDollId`、`boundDoll`、`photoAvailable`。
 - `GET /api/cards/:id/photo` (`owner`) → 返回原始上传照片流；已过期返回 `410 PHOTO_EXPIRED`；非拥有者返回 `404`。
@@ -131,7 +132,8 @@ data: {"code":"CHAT_TIMEOUT","message":"对话首字响应超过 10000ms 超时�
 - `GET /api/capabilities` 返回 `imageGenerationEnabled` 与 `photoMbtiEnabled`。
 - `GET /nfc/:alias` 返回 `302` 跳转到 `/d/:id/chat?entry=nfc&alias=...`。未绑定返回 `404`。
 - `POST /api/demo/nfc-tags/:alias/written` 接收 `{ url, scope }`。工坊核对标签读出的完整 URL 与当前环境的预期地址后登记时间。
-- 公开预览的生图和重生成返回 `403 CREATION_CLOSED`。`POST /api/mbti/recommend` 可接收一张照片并返回娃娃角色、材料、`photoStyle` 和 `dollDesign`。开启此功能需配置 `STEPFUN_VISION_MODEL`，照片在应用后端内存中处理。关闭时，照片请求返回 `409 PHOTO_MBTI_UNAVAILABLE`。四题快测使用 JSON 请求。
+- 在 Vercel 配置 `IMAGE_GENERATION_ENABLED=true` 和云端生图密钥后开放生图和重生成。
+- `POST /api/mbti/recommend` 可接收一张照片并返回娃娃角色、材料、`photoStyle` 和 `dollDesign`。开启照片分析需配置 `STEPFUN_VISION_MODEL`，照片在应用后端内存中处理。关闭时，照片请求返回 `409 PHOTO_MBTI_UNAVAILABLE`。四题快测使用 JSON 请求。
 - 重生成遇到上一次云端结果未确认时返回 `409 GENERATION_REVIEW_REQUIRED`。人工核对结果与费用后可发送 `reviewedUnknown: true`。
 
 

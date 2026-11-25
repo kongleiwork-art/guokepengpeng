@@ -26,9 +26,11 @@ Vite 构建前端。Express API 和 NFC 跳转运行在 Vercel Functions。预�
 | `DEMO_ADMIN_TOKEN` | `/dev` 工坊管理密钥 |
 | `STEPFUN_API_KEY`、`STEPFUN_CHAT_MODEL` | 阶跃星辰流式对话、四题快测和自适应访谈 |
 | `STEPFUN_VISION_MODEL` | 照片分析使用的阶跃星辰视觉模型，预览使用 `step-5-preview` |
+| `IMAGE_GENERATION_ENABLED` | 设为 `true` 开放娃娃形象生成 |
+| `OPENAI_API_KEY` | GPT Image 的服务端密钥 |
 | `PREVIEW_APP_URL` | 固定 HTTPS 预览地址，用于测试贴纸和角色分享链接 |
 
-通过 `/api/health` 检查后端就绪情况。预览的 `/create` 可在设备端实时识别人像并自动抓拍。确认后发送一张照片给阶跃星辰，准备娃娃的角色、配色和配饰。完整定制出图由 `IMAGE_GENERATION_ENABLED` 控制。
+通过 `/api/health` 检查后端就绪情况。预览的 `/create` 可在设备端实时识别人像并自动抓拍。确认后发送一张照片给阶跃星辰，准备娃娃的角色、配色和配饰。填写称呼后，点击方案中的「生成娃娃形象」，即可以照片和当前方案作为参考生成作品。
 
 取景使用 [MediaPipe Face Detector](https://developers.google.com/edge/mediapipe/solutions/vision/face_detector?tab=Web)。模型和运行文件随站点发布。
 
@@ -58,7 +60,7 @@ NODE_ENV=production npm start
    - 填写称呼（如：`小林`）；
    - 选择人格（可展开全部 16 种 MBTI，默认推荐 4 个风格差异显著的角色）；
    - 选择手作配饰（如：`苔绿手织围巾`、`黄铜细框眼镜`）；
-   - 点击 **开始生成娃娃形象**，自动跳转到 `/create/processing?cardId=...`（刷新页面按 `cardId` 恢复轮询，不重复提交）。
+   - 点击 **生成娃娃形象**，自动跳转到 `/create/processing?cardId=...`（刷新页面按 `cardId` 恢复轮询，不重复提交）。
 3. **在 `/card/{cardId}` 查看版本、重生成与绑定**：
    - 查看生成结果、耗时与 `resultKind`（`generated` / `mock` / `template`），支持下载成品图；
    - 可点击 **重新生成新版本**（旧版本永久保留，最多重生成 2 次）或 **使用预设模板兜底**（不计入模型次数）；

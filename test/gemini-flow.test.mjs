@@ -219,7 +219,7 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
   assert.equal(requests.length, 1);
 });
 
-test('StepFun SSE、GPT 参考图、会话隔离和任务幂等', { timeout: 30000 }, async (t) => {
+test('StepFun SSE、照片方案接 GPT 生图、会话隔离和任务幂等', { timeout: 30000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'nutshell-providers-'));
   const calls = { chat: [], image: [] };
   const fixture = createServer(async (req, res) => {
@@ -237,6 +237,8 @@ test('StepFun SSE、GPT 参考图、会话隔离和任务幂等', { timeout: 300
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
           choices: [{ message: { content: JSON.stringify({
             primaryMbti: 'ENFP', reason: '一起试试新点子。', alternateMbtis: ['INFP', 'ENFJ'], keywords: ['好奇'],
+            photoStyle: '苔绿色搭配浅棕色', dollDesign: '用浅棕橡果壳和苔绿织物做娃娃',
+            suggestedMaterialIds: ['hat_gingham'],
           }) } }],
         }));
         return;
@@ -268,6 +270,7 @@ test('StepFun SSE、GPT 参考图、会话隔离和任务幂等', { timeout: 300
     IMAGE_GENERATION_ENABLED: 'true', IMAGE_VENDOR: 'openai', IMAGE_PROVIDER: 'cloud',
     OPENAI_API_KEY: 'fixture', OPENAI_IMAGE_API_BASE: endpoint,
     CHAT_PROVIDER: 'cloud', STEPFUN_API_KEY: 'fixture', STEPFUN_API_BASE: endpoint,
+    STEPFUN_VISION_MODEL: 'step-5-preview',
   };
   const { base } = await startApp(t, dir, settings);
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -304,16 +307,26 @@ test('StepFun SSE、GPT 参考图、会话隔离和任务幂等', { timeout: 300
   }));
   assert.equal(quiz.source, 'cloud_quiz');
 
-  const create = () => {
+  const portrait = new FormData();
+  portrait.set('photo', new Blob([photo], { type: 'image/jpeg' }), 'reference.jpg');
+  const brief = await json(await owner('/api/mbti/recommend', { method: 'POST', body: portrait }));
+  assert.equal(brief.source, 'cloud_vision');
+  assert.equal(calls.image.length, 0);
+
+  const create = (dollDesign = brief.dollDesign) => {
     const form = new FormData();
     form.set('photo', new Blob([photo], { type: 'image/jpeg' }), 'reference.jpg');
     form.set('userNickname', '展位测试');
-    form.set('personaId', 'persona_enfp');
+    form.set('personaId', brief.primaryPersonaId);
+    form.set('accessoryIds', JSON.stringify(brief.suggestedMaterialIds));
+    form.set('photoStyle', brief.photoStyle);
+    form.set('dollDesign', dollDesign);
     return owner('/api/cards', { method: 'POST', headers: { 'Idempotency-Key': 'same-card' }, body: form });
   };
   const [first, same] = await Promise.all([create().then((res) => json(res, 202)), create().then((res) => json(res, 202))]);
   assert.equal(first.versionId, same.versionId);
   assert.equal((await json(await owner('/api/cards'))).length, 1);
+  assert.equal((await create('不同的娃娃方案')).status, 409);
 
   const waitFor = async (url) => {
     for (let attempt = 0; attempt < 100; attempt++) {
@@ -330,6 +343,9 @@ test('StepFun SSE、GPT 参考图、会话隔离和任务幂等', { timeout: 300
   assert.match(calls.image[0].type, /multipart\/form-data/);
   assert.match(calls.image[0].body.toString(), /name="image\[\]"; filename="reference.jpeg"/);
   assert.ok(calls.image[0].body.includes(photo));
+  assert.ok(calls.image[0].body.includes(brief.photoStyle));
+  assert.ok(calls.image[0].body.includes(brief.dollDesign));
+  assert.ok(calls.image[0].body.includes('格纹布帽'));
   assert.equal((await fetch(base + version.resultUrl)).status, 404);
   assert.equal((await owner(version.resultUrl)).status, 200);
 
@@ -349,4 +365,5 @@ test('StepFun SSE、GPT 参考图、会话隔离和任务幂等', { timeout: 300
   assert.equal(blocked.status, 409);
   assert.equal((await blocked.json()).error.code, 'GENERATION_REVIEW_REQUIRED');
   assert.equal(calls.image.length, 2);
+  assert.ok(calls.image[1].body.includes(brief.dollDesign));
 });

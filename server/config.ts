@@ -29,6 +29,15 @@ function resolveProviderMode(explicit: string | undefined, configured: boolean):
   return configured ? 'cloud' : 'mock';
 }
 
+const imageProvider = resolveProviderMode(
+  process.env.IMAGE_PROVIDER,
+  isVercel || Boolean(imageVendor === 'openai' ? openaiImageKey : geminiApiKey),
+);
+const imageGenerationEnabled = isVercel
+  ? process.env.IMAGE_GENERATION_ENABLED === 'true' &&
+    (imageProvider === 'mock' || Boolean(openaiImageKey || geminiApiKey))
+  : process.env.IMAGE_GENERATION_ENABLED !== 'false';
+
 export const IMAGE_TIER_LABELS: Record<ImageModelTier, string> = {
   fast: '快速',
   hd: '高清',
@@ -64,9 +73,9 @@ export const config = {
   stepfunVisionModel: process.env.STEPFUN_VISION_MODEL?.trim() || '',
   chatFirstTokenTimeoutMs: Math.max(1000, Number(process.env.CHAT_FIRST_TOKEN_TIMEOUT_MS || 15000)),
   chatContextMaxMessages: Math.max(4, Number(process.env.CHAT_CONTEXT_MAX_MESSAGES || 20)),
-  imageGenerationEnabled: isVercel ? !isPreview && process.env.IMAGE_GENERATION_ENABLED === 'true' : process.env.IMAGE_GENERATION_ENABLED !== 'false',
+  imageGenerationEnabled,
   imageVendor,
-  imageProvider: resolveProviderMode(process.env.IMAGE_PROVIDER, Boolean(imageVendor === 'openai' ? openaiImageKey : geminiApiKey)),
+  imageProvider,
   geminiApiKey,
   geminiImageBaseUrl: process.env.GEMINI_IMAGE_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com',
   openaiImageKey,

@@ -56,6 +56,7 @@ import {
   enqueueOutputJob,
   schedulePhotoCleanup,
   snapshotImageSettings,
+  type ImageSettings,
 } from '../workers/taskWorker.ts';
 
 const router = express.Router();
@@ -1210,6 +1211,8 @@ router.post('/cards', ensureSession, uploadPhoto, async (req, res) => {
   const idempotencyKey = extractIdempotencyKey(req);
   const userNickname = typeof req.body?.userNickname === 'string' ? req.body.userNickname.trim() : '';
   const personaId = typeof req.body?.personaId === 'string' ? req.body.personaId.trim() : '';
+  const photoStyle = typeof req.body?.photoStyle === 'string' ? req.body.photoStyle.trim().slice(0, 120) || undefined : undefined;
+  const dollDesign = typeof req.body?.dollDesign === 'string' ? req.body.dollDesign.trim().slice(0, 180) || undefined : undefined;
 
   let accessoryIds: string[] = [];
   if (Array.isArray(req.body?.accessoryIds)) {
@@ -1255,7 +1258,7 @@ router.post('/cards', ensureSession, uploadPhoto, async (req, res) => {
 
   const photoHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
   const simulateFail = req.get('x-mock-fail') === 'true';
-  const requestHash = hashObject({ userNickname, personaId, accessoryIds, photoHash, simulateFail });
+  const requestHash = hashObject({ userNickname, personaId, accessoryIds, photoHash, simulateFail, photoStyle, dollDesign });
   const cached = await checkIdempotency<{ data: { versionId: string } }>(
     sessionId, 'create_card', idempotencyKey, requestHash,
   );
@@ -1298,7 +1301,7 @@ router.post('/cards', ensureSession, uploadPhoto, async (req, res) => {
       `INSERT INTO card_versions (id, card_id, version_number, status, provider, result_kind, created_at, image_settings, simulate_fail)
        VALUES (?, ?, 1, 'queued', ?, ?, ?, ?, ?)`
     ).run(versionId, cardId, provider, provider === 'cloud' ? 'generated' : 'mock', timestamp,
-      snapshotImageSettings(settings), Number(provider === 'mock' && simulateFail));
+      snapshotImageSettings({ ...settings, photoStyle, dollDesign }), Number(provider === 'mock' && simulateFail));
     return { data: {
       cardId, versionId, status: 'queued', provider,
       imageModelTier: settings.imageModelTier,
@@ -1465,7 +1468,12 @@ router.post('/cards/:id/redraw', ensureSession, async (req, res) => {
       throw Object.assign(new Error('当前生图服务尚未配置密钥'), { status: 503, code: 'PROVIDER_NOT_CONFIGURED' });
     }
     const card = await db
-      .prepare(`SELECT * FROM cards WHERE id = ? AND owner_session_id = ?`)
+      .prepare(
+        `SELECT cards.*, initial.image_settings AS initial_image_settings
+         FROM cards
+         LEFT JOIN card_versions initial ON initial.card_id = cards.id AND initial.version_number = 1
+         WHERE cards.id = ? AND cards.owner_session_id = ?`
+      )
       .get(cardId, sessionId) as Record<string, unknown> | undefined;
 
     if (!card) {
@@ -1521,11 +1529,17 @@ router.post('/cards/:id/redraw', ensureSession, async (req, res) => {
     const newVersionId = `ver_${crypto.randomBytes(8).toString('hex')}`;
     const resultKind = providerMode === 'cloud' ? 'generated' : 'mock';
     const nowIso = new Date().toISOString();
+    const initialSettings = typeof card.initial_image_settings === 'string'
+      ? JSON.parse(card.initial_image_settings) as ImageSettings | null
+      : null;
+    const imageSettings = snapshotImageSettings({
+      ...runtimeSettings, photoStyle: initialSettings?.photoStyle, dollDesign: initialSettings?.dollDesign,
+    });
 
     await db.prepare(
       `INSERT INTO card_versions (id, card_id, version_number, status, provider, result_kind, created_at, image_settings, simulate_fail)
        VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)`
-    ).run(newVersionId, cardId, versionNumber, providerMode, resultKind, nowIso, snapshotImageSettings(runtimeSettings), Number(simulateFail && providerMode === 'mock'));
+    ).run(newVersionId, cardId, versionNumber, providerMode, resultKind, nowIso, imageSettings, Number(simulateFail && providerMode === 'mock'));
 
     await db.prepare(
       `UPDATE cards SET generation_attempts = generation_attempts + 1, active_version_id = ? WHERE id = ?`

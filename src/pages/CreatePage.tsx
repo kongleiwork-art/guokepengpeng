@@ -109,6 +109,7 @@ export function CreatePage() {
         if (!active) return;
         setCreationEnabled(capabilities.imageGenerationEnabled);
         setPhotoMbtiEnabled(capabilities.photoMbtiEnabled);
+        if (capabilities.photoMbtiEnabled) setPersonaMode('manual');
         await api.initSession();
         const [pList, aList, references] = await Promise.all([
           api.listPersonas(),
@@ -247,7 +248,7 @@ export function CreatePage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (submitting || !creationEnabled) return;
+    if (submitting || photoPreparing || recommending || !creationEnabled) return;
     setSubmitError(null);
 
     if (!photoFile) {
@@ -269,6 +270,12 @@ export function CreatePage() {
       formData.append('userNickname', userNickname.trim());
       formData.append('personaId', personaId);
       formData.append('accessoryIds', JSON.stringify(selectedAccessories));
+      if (photoRecommendation?.photoStyle) {
+        formData.set('photoStyle', photoRecommendation.photoStyle);
+      }
+      if (photoRecommendation?.dollDesign && photoRecommendation.primaryPersonaId === personaId) {
+        formData.set('dollDesign', photoRecommendation.dollDesign);
+      }
 
       const res = await api.createCard(formData, idemKeyRef.current);
       navigate(`/create/processing?cardId=${encodeURIComponent(res.cardId)}`);
@@ -304,6 +311,17 @@ export function CreatePage() {
       items: groups.get(cat) ?? [],
     })).filter((g) => g.items.length > 0);
   }, [accessories]);
+
+  const renderGenerateAction = () => (
+    <div className="flex-1 space-y-1.5">
+      <button type="submit" disabled={submitting || photoPreparing || recommending || !photoFile}
+        className="btn-capsule-primary inline-flex min-h-11 w-full items-center justify-center gap-2 px-4 text-sm font-medium disabled:opacity-55">
+        <Sparkles className="h-4 w-4" aria-hidden="true" />
+        {submitting ? '正在提交绘制任务…' : '生成娃娃形象'}
+      </button>
+      <p className="text-xs leading-relaxed text-[#6E5C50]">提交后，将参考照片和当前方案发送给生图服务。</p>
+    </div>
+  );
 
   const renderPreparedDoll = () => {
     if (!photoRecommendation || !activePersona) return null;
@@ -350,7 +368,7 @@ export function CreatePage() {
         <div className="flex flex-wrap items-center gap-2" aria-label="调整娃娃性格">
           <span className="text-xs text-[#6E5C50]">换个性格</span>
           {roles.map(mbti => (
-            <button key={mbti} type="button" aria-pressed={activePersona.mbti === mbti}
+            <button key={mbti} type="button" disabled={submitting} aria-pressed={activePersona.mbti === mbti}
               className="btn-paper-soft min-h-8 px-2.5 text-xs font-mono aria-pressed:bg-[#D8EBE3]"
               onClick={() => {
                 const persona = personas.find(item => item.mbti === mbti);
@@ -361,7 +379,9 @@ export function CreatePage() {
               }}>{mbti}</button>
           ))}
         </div>
-        {!creationEnabled && <p className="text-xs text-[#6E5C50]">完整定制出图待开放</p>}
+        {creationEnabled ? renderGenerateAction() : (
+          <p className="text-xs text-[#6E5C50]">完整定制出图待开放</p>
+        )}
       </section>
     );
   };
@@ -384,7 +404,6 @@ export function CreatePage() {
           {photoRecommendError && <p role="alert" className="text-xs text-[#9E3D2E]">{photoRecommendError}</p>}
         </div>
       )}
-      {renderPreparedDoll()}
     </div>
   );
 
@@ -404,6 +423,7 @@ export function CreatePage() {
           id="userNickname"
           type="text"
           required
+          disabled={submitting}
           maxLength={32}
           value={userNickname}
           onChange={(e) => {
@@ -414,6 +434,7 @@ export function CreatePage() {
           className="w-full px-3.5 py-2.5 text-[16px] sm:text-sm bg-[#FAF7F2] border border-[#E4DBCE] rounded-xl focus:outline-none focus:bg-white focus:ring-2 focus:ring-[#4A8276]/20 focus:border-[#4A8276] transition-colors"
         />
       </div>
+      {renderPreparedDoll()}
     </div>
   );
 
@@ -652,7 +673,7 @@ export function CreatePage() {
       </div>
 
       <p className="text-[11.5px] text-[#8E7C6E] leading-relaxed">
-        以下均来自工坊当前在库材料清单，Google Nano 生图会严格贴合所选实材，方便线下手工复刻。
+        材料来自工坊库存，生成娃娃形象时会用作造型参考。
       </p>
 
       <div className="space-y-3 max-h-[340px] lg:max-h-[370px] overflow-y-auto pr-1">
@@ -738,7 +759,10 @@ export function CreatePage() {
           <Link to="/plaza" className="inline-block text-sm font-medium text-[#3D7267]">逛果壳展馆</Link>
         </section>
         {!loadError && photoMbtiEnabled && (
-          <section className="studio-card rounded-[20px] p-4 sm:p-5">{renderPortraitTools()}</section>
+          <section className="studio-card space-y-4 rounded-[20px] p-4 sm:p-5">
+            {renderPortraitTools()}
+            {renderPreparedDoll()}
+          </section>
         )}
         {!loadError && (photoMbtiEnabled ? (
           <details className="studio-card rounded-[20px] p-4 sm:p-5"
@@ -802,7 +826,7 @@ export function CreatePage() {
             <div className={step === 3 ? 'block' : 'hidden'}>{renderAccessoriesStep()}</div>
 
             {submitError && (
-              <div className="p-3 rounded-xl border border-[#E5B8B0] bg-[#FDF2F0] text-xs text-[#9E3D2E]">
+              <div role="alert" className="p-3 rounded-xl border border-[#E5B8B0] bg-[#FDF2F0] text-xs text-[#9E3D2E]">
                 {submitError}
               </div>
             )}
@@ -833,17 +857,11 @@ export function CreatePage() {
                   }}
                   className="inline-flex items-center justify-center gap-1.5 px-5 py-2.5 text-[13px] font-medium btn-ink-tinted whitespace-nowrap"
                 >
-                  <span>{step === 1 ? '下一步 · AI 测人格' : '下一步 · 挑材料'}</span>
+                  <span>{step === 1 ? '下一步 · 选性格' : '下一步 · 挑材料'}</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
               ) : (
-                <button
-                  type="submit"
-                  disabled={submitting || photoPreparing || recommending || !photoFile || !userNickname.trim()}
-                  className="flex-1 inline-flex items-center justify-center px-5 py-2.5 text-sm font-medium btn-capsule-primary whitespace-nowrap"
-                >
-                  {submitting ? '正在创建绘制任务…' : '开始生成果壳形象'}
-                </button>
+                renderGenerateAction()
               )}
             </div>
           </div>
@@ -855,17 +873,11 @@ export function CreatePage() {
             <section className="col-span-5 studio-card rounded-[20px] p-6 space-y-5">
               {renderPhotoAndNickname()}
               {submitError && (
-                <div className="p-3 rounded-xl border border-[#E5B8B0] bg-[#FDF2F0] text-xs text-[#9E3D2E]">
+                <div role="alert" className="p-3 rounded-xl border border-[#E5B8B0] bg-[#FDF2F0] text-xs text-[#9E3D2E]">
                   {submitError}
                 </div>
               )}
-              <button
-                type="submit"
-                disabled={submitting || photoPreparing || recommending || !photoFile || !userNickname.trim()}
-                className="w-full inline-flex items-center justify-center px-6 py-3 text-sm font-medium btn-capsule-primary whitespace-nowrap"
-              >
-                {submitting ? '正在创建绘制任务…' : '开始生成果壳形象'}
-              </button>
+              {!photoRecommendation && renderGenerateAction()}
             </section>
 
             <section className="col-span-7 studio-card rounded-[20px] p-6 space-y-5">
@@ -875,7 +887,7 @@ export function CreatePage() {
                     定制专属果壳娃娃
                   </h1>
                   <p className="text-xs text-[#9A887B] mt-0.5">
-                    采用荣格八维自适应 AI 访谈精准定型 MBTI，并严格贴合工坊在库材料生成。
+                    选择娃娃的性格和工坊材料，生成专属形象。
                   </p>
                 </div>
                 <div className="ios-segmented grid grid-cols-2 w-[240px] shrink-0">
