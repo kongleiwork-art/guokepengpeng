@@ -56,11 +56,21 @@ export function initDatabase() {
 
 async function initialize(): Promise<{ recoveredRunningVersions: number; recoveredRunningJobs: number }> {
   if (config.isVercel && !config.sessionSecret) throw new Error('SESSION_SECRET 未配置');
-  const schemaVersion = async () => (await db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+  const schemaVersion = async () => {
+    const settingsTable = await db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'app_settings'",
+    ).get();
+    if (!settingsTable) return 0;
+    const row = await db.prepare(
+      "SELECT value FROM app_settings WHERE key = 'schema_version'",
+    ).get() as { value: string } | undefined;
+    return Number(row?.value ?? 0);
+  };
   const migrate = db.transaction(async () => {
     if (await schemaVersion() >= 1) return;
-    await migrateAndSeed();
-    await db.exec('PRAGMA user_version = 1');
+    const legacy = await db.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (legacy.user_version < 1) await migrateAndSeed();
+    await db.prepare("INSERT INTO app_settings (key, value) VALUES ('schema_version', '1')").run();
   });
   if (await schemaVersion() < 1) await migrate();
   if (config.isVercel) return { recoveredRunningVersions: 0, recoveredRunningJobs: 0 };
