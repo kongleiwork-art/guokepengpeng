@@ -13,6 +13,7 @@ import { FALLBACK_TEMPLATES, getAccessoryLabels } from '../data/seed.ts';
 import type { MaterialRecord } from '../db.ts';
 import { inspectImageBuffer } from '../utils/imageValidation.ts';
 import { writeMedia } from '../mediaStore.ts';
+import { materialPart } from '../../src/lib/materialCategories.ts';
 
 export interface DollBrief {
   photoStyle?: string;
@@ -33,6 +34,7 @@ export interface ImageGenerateInput extends DollBrief {
   personaVisualTrait?: string;
   accessoryIds: string[];
   selectedMaterials: MaterialRecord[];
+  useExactMaterialReferences?: boolean;
   strictMaterialConstraint: boolean;
   imageModelTier: ImageModelTier;
   imageModel: string;
@@ -54,7 +56,22 @@ export interface ImageProvider {
   generate(input: ImageGenerateInput, signal: AbortSignal): Promise<ImageGenerateResult>;
 }
 
-export function buildDollImagePrompt(input: ImageGenerateInput): string {
+export function buildDollImagePrompt(input: ImageGenerateInput, materialImageLabels: string[] = []): string {
+  if (input.useExactMaterialReferences) {
+    return [
+      'Create one small, visibly hand-assembled craft doll on a clean white studio background.',
+      'The material list below is exhaustive. Use every selected material and add no other visible parts, props, paint, fabrics, or accessories. Leave out a feature if there is no selected material for it.',
+      'Input image 1 is the portrait, for mood only. Copy no visible clothing or personal accessories from it. For each later image, preserve the material’s actual shape, texture, and palette. Use one of the shown variants if that reference shows several.',
+      input.photoStyle ? `Portrait mood note for pose and expression only: ${input.photoStyle}` : '',
+      `The doll’s character is ${input.personaMbti} (${input.personaName}). Express this through arrangement and pose within the allowed parts.`,
+      ...input.selectedMaterials.map((material, index) =>
+        `Input image ${index + 2}: ${material.label} (${material.material}). Part: ${materialPart(material.id, material.category)}. Details: ${material.visualHint}`,
+      ),
+      input.dollDesign ? `Arrangement inspiration only, subject to the material list: ${input.dollDesign}` : '',
+      'Keep the assembly feasible for hand craft. Show the whole doll and its material textures with gentle studio light. No text, graphic overlays, or watermark.',
+    ].filter(Boolean).join('\n');
+  }
+
   const matLines =
     input.selectedMaterials.length > 0
       ? input.selectedMaterials
@@ -63,7 +80,7 @@ export function buildDollImagePrompt(input: ImageGenerateInput): string {
       : `- Natural dried nut shell doll base with cotton-linen cloth body (${input.personaMaterialHint})`;
 
   const strictRules = input.strictMaterialConstraint
-    ? 'STRICT CRAFTABILITY RULE: Every visible component of this doll MUST be physically buildable in a real campus craft workshop using ONLY the selected real materials above (natural dried nut shells, wool yarn, woven cotton/linen fabric, wooden beads, twine, brass bells, dried flowers). Do NOT invent sci-fi holograms, glowing neon crystals, glass wings, metallic armor, or uncraftable fantasy props.'
+    ? 'STRICT CRAFTABILITY RULE: Use the selected real materials above for the doll’s visible body, outfit and accessories. Keep the construction feasible for hand assembly in a craft workshop. Avoid invented fantasy props and materials unavailable in this selection.'
     : 'Prefer real tactile craft textures (natural nut shells, wool yarn, cotton-linen cloth, wooden beads, dried botanicals) while keeping a charming handmade toy silhouette.';
 
   const mbtiVisual =
@@ -76,6 +93,10 @@ export function buildDollImagePrompt(input: ImageGenerateInput): string {
     `16-MBTI Personality Visual Mapping (${input.personaMbti} · ${input.personaName}): ${mbtiVisual}`,
     'Selected Real Craft Workshop Materials to Render Faithfully:',
     matLines,
+    ...(materialImageLabels.length ? [
+      'Input image 1 is the portrait. Use the following material illustrations for the shape, proportions, colors and texture of the selected miniature components. If a swatch shows variants, use one appropriate variant on the doll.',
+      ...materialImageLabels.map((label, index) => `Input image ${index + 2}: ${label}`),
+    ] : []),
     strictRules,
     input.photoStyle || input.dollDesign
       ? 'Use the following studio notes as visual inspiration. Follow the selected doll role and available materials when adapting these notes.'
@@ -100,6 +121,20 @@ function resolveLocalAssetFile(urlPath: string): { absPath: string; mime: string
     }
   }
   return null;
+}
+
+async function loadMaterialReferenceImages(input: ImageGenerateInput, legacyLimit = 6) {
+  const files = input.selectedMaterials.flatMap(({ id, label, referenceImageUrl }) => {
+    const file = referenceImageUrl ? resolveLocalAssetFile(referenceImageUrl) : null;
+    return file ? [{ id, label, ...file }] : [];
+  });
+  if (input.useExactMaterialReferences && (files.length === 0 || files.length !== input.selectedMaterials.length)) {
+    throw Object.assign(new Error('所选材料的参考图不齐，请重新选材'), { code: 'MATERIAL_REFERENCES_REQUIRED' });
+  }
+  const selected = input.useExactMaterialReferences ? files : files.slice(0, legacyLimit);
+  return Promise.all(selected.map(async ({ id, label, mime, absPath }) => ({
+    id, label, mime, data: await fs.promises.readFile(absPath),
+  })));
 }
 
 async function saveGeneratedAsset(versionId: string, ext: string, data: Buffer, mime: string): Promise<string> {
@@ -128,14 +163,17 @@ class GeminiImageProvider implements ImageProvider {
     }
 
     const startedAt = Date.now();
-    const prompt = buildDollImagePrompt(input);
+    const targetModel = input.imageModel || IMAGE_MODELS.gemini[input.imageModelTier];
+    const references = await loadMaterialReferenceImages(
+      input, targetModel.startsWith('gemini-2.5-flash-image') ? 2 : 6,
+    );
+    const prompt = buildDollImagePrompt(input, references.map(({ label }) => label));
 
     const ai = new GoogleGenAI({
       apiKey: config.geminiApiKey,
       vertexai: false,
       httpOptions: { baseUrl: config.geminiImageBaseUrl, apiVersion: 'v1beta', timeout: config.imageTimeoutMs, retryOptions: { attempts: 1 } },
     });
-    const targetModel = input.imageModel || IMAGE_MODELS.gemini[input.imageModelTier];
     let response;
     try {
       response = await ai.models.generateContent({
@@ -144,6 +182,9 @@ class GeminiImageProvider implements ImageProvider {
           role: 'user',
           parts: [
             { inlineData: { data: input.photoBuffer.toString('base64'), mimeType: input.photoMime } },
+            ...references.map(({ data, mime }) => ({
+              inlineData: { data: data.toString('base64'), mimeType: mime },
+            })),
             { text: prompt },
           ],
         }],
@@ -325,14 +366,18 @@ class OpenAIImageProvider implements ImageProvider {
     }
 
     const startedAt = Date.now();
+    const references = await loadMaterialReferenceImages(input);
     const form = new FormData();
     form.set('model', input.imageModel);
-    form.set('prompt', buildDollImagePrompt(input));
+    form.set('prompt', buildDollImagePrompt(input, references.map(({ label }) => label)));
     form.set('size', '1024x1536');
     form.set('quality', input.imageModelTier === 'hd' ? 'high' : 'low');
     form.set('output_format', 'webp');
     const photo = new Blob([Uint8Array.from(input.photoBuffer)], { type: input.photoMime });
     form.append('image[]', photo, 'reference.' + (input.photoMime.split('/')[1] || 'jpg'));
+    for (const { id, mime, data } of references) {
+      form.append('image[]', new Blob([Uint8Array.from(data)], { type: mime }), id + '.webp');
+    }
 
     let response: Response;
     try {

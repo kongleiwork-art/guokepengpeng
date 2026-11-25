@@ -34,17 +34,10 @@ import type {
   SessionInfo,
 } from '../lib/types';
 import { haptic } from '../lib/haptics';
+import { MATERIAL_CATEGORY_LABELS as CATEGORY_LABELS } from '../lib/materialCategories';
 
 type DevTab = 'overview' | 'nfc' | 'materials' | 'sessions' | 'logs';
 const EASE_STUDIO = [0.22, 1, 0.36, 1] as const;
-
-const CATEGORY_LABELS: Record<MaterialCategory, string> = {
-  nut_body: '天然果实主体',
-  yarn_hair: '毛线与发丝',
-  fabric_outfit: '布艺与服饰',
-  hardware_charm: '挂饰与五金',
-  dried_botanical: '干燥花草点缀',
-};
 
 const SAMPLE_IMPORT_TEMPLATE = [
   {
@@ -312,7 +305,7 @@ export function DevAdminPage() {
       setNewMatMaterial('');
       setNewMatVisualHint('');
       haptic('success');
-      setNotice('已新增在库手作材料，定制页与 Nano 提示词已实时生效。');
+      setNotice('已新增工坊材料。严格实材模式使用有参考图的可用材料。');
       await loadAllAdminData(adminToken.trim());
     } catch (err) {
       setError(err instanceof Error ? err.message : '新增材料失败');
@@ -1084,7 +1077,7 @@ export function DevAdminPage() {
                           工坊真实材料库（在库 {materials.filter((m) => m.inStock).length} / 共 {materials.length}）
                         </h2>
                         <p className="text-xs text-[#8E7C6E]">
-                          仅「在库」材料会展示在定制页并注入 Google Nano 生图提示词；准备好材料清单后可一键 JSON 导入。
+                          严格实材模式使用有参考图的在库材料。材料清单支持 JSON 导入。
                         </p>
                       </div>
                     </div>
@@ -1156,7 +1149,7 @@ export function DevAdminPage() {
                             rows={6}
                             value={importJsonText}
                             onChange={(e) => setImportJsonText(e.target.value)}
-                            placeholder='粘贴材料 JSON 数组，每项包含 label, material, category(nut_body/yarn_hair/fabric_outfit/hardware_charm/dried_botanical), visualHint, inStock'
+                            placeholder='粘贴材料 JSON 数组，每项包含 label、material、category、visualHint、inStock'
                             className="w-full p-3 text-xs font-mono bg-white border border-[#E4DBCE] rounded-xl focus:outline-none focus:border-[#4A8276]"
                           />
 

@@ -1,4 +1,5 @@
-import type { FallbackTemplate, MaterialCategory, MaterialRecord } from '../../src/lib/types.ts';
+import type { FallbackTemplate, MaterialRecord } from '../../src/lib/types.ts';
+import { MATERIAL_PACK } from './materialPack.ts';
 
 export type { MaterialCategory } from '../../src/lib/types.ts';
 
@@ -50,14 +51,6 @@ export const PERSONA_SEEDS = characters.map(([mbti, name, tagline, materialHint,
   ...personaDetails[mbti],
 }));
 
-export const MATERIAL_CATEGORY_LABELS: Record<MaterialCategory, string> = {
-  nut_body: '果壳躯干',
-  yarn_hair: '毛线发饰',
-  fabric_outfit: '布料服饰',
-  hardware_charm: '小五金与挂件',
-  dried_botanical: '干花与植物',
-};
-
 const materials: Omit<MaterialRecord, 'inStock' | 'sortOrder'>[] = [
   { id: 'hat_gingham', label: '格纹布帽', category: 'fabric_outfit', material: '棉布', visualHint: '格纹拼布，帽沿可见针脚' },
   { id: 'bell_copper', label: '小铜铃', category: 'hardware_charm', material: '黄铜', visualHint: '挂在腰侧的小黄铜铃' },
@@ -76,7 +69,7 @@ export const DEFAULT_MATERIAL_SEEDS = materials.map((material, sortOrder) => ({
   ...material, sortOrder, inStock: true,
 }));
 
-const labels = new Map(materials.map(({ id, label }) => [id, label]));
+const labels = new Map([...materials, ...MATERIAL_PACK].map(({ id, label }) => [id, label]));
 export function getAccessoryLabels(ids: string[]): string[] {
   return ids.map((id) => labels.get(id) ?? id);
 }

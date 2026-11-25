@@ -11,6 +11,7 @@ import {
   PERSONA_SEEDS,
   type MaterialCategory,
 } from './data/seed.ts';
+import { MATERIAL_PACK, MATERIAL_PACK_BY_ID } from './data/materialPack.ts';
 
 import { db } from './databaseClient.ts';
 export { db };
@@ -21,6 +22,7 @@ export interface MaterialRecord {
   category: MaterialCategory;
   material: string;
   visualHint: string;
+  referenceImageUrl?: string;
   inStock: boolean;
   sortOrder: number;
   createdAt: string;
@@ -67,12 +69,18 @@ async function initialize(): Promise<{ recoveredRunningVersions: number; recover
     return Number(row?.value ?? 0);
   };
   const migrate = db.transaction(async () => {
-    if (await schemaVersion() >= 1) return;
-    const legacy = await db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (legacy.user_version < 1) await migrateAndSeed();
-    await db.prepare("INSERT INTO app_settings (key, value) VALUES ('schema_version', '1')").run();
+    const version = await schemaVersion();
+    if (version >= 2) return;
+    if (version < 1) {
+      const legacy = await db.prepare('PRAGMA user_version').get() as { user_version: number };
+      if (legacy.user_version < 1) await migrateAndSeed();
+    }
+    await installMaterialPack();
+    await db.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('schema_version', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    ).run();
   });
-  if (await schemaVersion() < 1) await migrate();
+  if (await schemaVersion() < 2) await migrate();
   if (config.isVercel) return { recoveredRunningVersions: 0, recoveredRunningJobs: 0 };
 
   const now = new Date().toISOString();
@@ -374,6 +382,18 @@ async function migrateAndSeed(): Promise<void> {
   await seedTx();
 }
 
+async function installMaterialPack(): Promise<void> {
+  const now = new Date().toISOString();
+  const placeholders = MATERIAL_PACK.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+  await db.prepare(
+    `INSERT OR IGNORE INTO materials (id, label, category, material, visual_hint, in_stock, sort_order, created_at, updated_at)
+     VALUES ${placeholders}`,
+  ).run(...MATERIAL_PACK.flatMap(item => [
+    item.id, item.label, item.category, item.material, item.visualHint,
+    Number(item.inStock), item.sortOrder, now, now,
+  ]));
+}
+
 async function recoverInterruptedLocalJobs(now: string) {
   // Startup recovery: Unknown running tasks transition to failed with WORKER_RESTARTED
   const recoveredVersions = await db
@@ -471,11 +491,17 @@ export async function listMaterials(onlyInStock = false): Promise<MaterialRecord
     category: String(r.category) as MaterialCategory,
     material: String(r.material),
     visualHint: String(r.visual_hint),
+    referenceImageUrl: MATERIAL_PACK_BY_ID.get(String(r.id))?.referenceImageUrl,
     inStock: Number(r.in_stock) === 1,
     sortOrder: Number(r.sort_order || 0),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   }));
+}
+
+export async function listCreationMaterials(strict: boolean): Promise<MaterialRecord[]> {
+  const materials = await listMaterials(true);
+  return strict ? materials.filter(material => material.referenceImageUrl) : materials;
 }
 
 export async function getMaterialsByIds(ids: string[]): Promise<MaterialRecord[]> {

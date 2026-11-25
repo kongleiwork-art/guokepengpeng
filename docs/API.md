@@ -55,6 +55,8 @@
 
 - `GET /api/personas` (`session`) → `200` 返回全部 16 种 MBTI 人格公开字段（`id, name, mbti, tagline, materialHint, openingLine, featured`），**不返回内部 `prompt`**。
 - `GET /api/accessories` (`session`) → `200` 返回手作配饰选项列表。
+  - 材料包条目含 `referenceImageUrl`，指向用于展示与生图的彩色材料图。
+  - 严格实材模式下仅返回有参考图的可用材料。
 - `GET /api/templates` (`session`) → `200` 返回预设兜底模板列表。
 
 ### 3. 娃娃档案
@@ -98,6 +100,7 @@ data: {"code":"CHAT_TIMEOUT","message":"对话首字响应超过 10000ms 超时�
 - `POST /api/cards` (`session`, `multipart/form-data`, `Idempotency-Key`)
   - 字段：`photo`（JPEG/PNG/WebP，二进制头校验且 ≤ 2 MB）、`userNickname`、`personaId`、可选 `accessoryIds`。
   - 可选 `photoStyle` 和 `dollDesign`，最多 120 和 180 个字符。文本随任务快照保存，重生成时沿用原方案。
+  - 严格实材模式要求选择 1 到 6 种有参考图的可用材料。选材和图片引用随任务保存，缺图时返回 `MATERIAL_REFERENCES_REQUIRED`。
   - 返回 `202 { cardId, versionId, status: "queued", provider, cardUrl, processingUrl }`。
 - `GET /api/cards/:id` (`owner`) → `200` 返回卡片详情、全部 `versions`、`activeVersionId`、`remainingAttempts`、`boundDollId`、`boundDoll`、`photoAvailable`。
 - `GET /api/cards/:id/photo` (`owner`) → 返回原始上传照片流；已过期返回 `410 PHOTO_EXPIRED`；非拥有者返回 `404`。

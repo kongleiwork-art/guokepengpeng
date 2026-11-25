@@ -1,13 +1,13 @@
 import crypto from 'node:crypto';
 import { config } from '../config.ts';
-import { db, getMaterialsByIds, getRuntimeSettings, recordRunLog, type RuntimeSettings } from '../db.ts';
+import { db, getMaterialsByIds, getRuntimeSettings, recordRunLog, type MaterialRecord, type RuntimeSettings } from '../db.ts';
 import { getImageProvider, type DollBrief } from '../providers/imageProvider.ts';
 import { getOutputProvider } from '../providers/outputProvider.ts';
 import { deleteMedia, readMedia } from '../mediaStore.ts';
 import { publishTask, type Task } from './taskQueue.ts';
 
 export type ImageSettings = Pick<RuntimeSettings, 'imageVendor' | 'imageModel' | 'imageModelTier' | 'strictMaterialConstraint'> &
-  DollBrief;
+  DollBrief & { materialPlan?: MaterialRecord[] };
 
 interface QueuedVersionRow {
   id: string;
@@ -39,9 +39,9 @@ interface QueuedOutputJobRow {
 }
 
 export function snapshotImageSettings({
-  imageVendor, imageModel, imageModelTier, strictMaterialConstraint, photoStyle, dollDesign,
+  imageVendor, imageModel, imageModelTier, strictMaterialConstraint, photoStyle, dollDesign, materialPlan,
 }: ImageSettings): string {
-  return JSON.stringify({ imageVendor, imageModel, imageModelTier, strictMaterialConstraint, photoStyle, dollDesign });
+  return JSON.stringify({ imageVendor, imageModel, imageModelTier, strictMaterialConstraint, photoStyle, dollDesign, materialPlan });
 }
 
 async function enqueueTask(kind: 'image' | 'output', id: string): Promise<void> {
@@ -152,10 +152,10 @@ async function processImageVersion(versionId: string): Promise<void> {
       return;
     }
     const accessoryIds = JSON.parse(row.accessory_ids || '[]') as string[];
-    const selectedMaterials = await getMaterialsByIds(accessoryIds);
     const runtimeSettings: ImageSettings = row.image_settings
       ? JSON.parse(row.image_settings)
       : await getRuntimeSettings();
+    const selectedMaterials = runtimeSettings.materialPlan ?? await getMaterialsByIds(accessoryIds);
     const provider = getImageProvider(row.provider, runtimeSettings.imageVendor);
     const shouldFail = row.simulate_fail === 1;
     controller.signal.throwIfAborted();
@@ -177,6 +177,7 @@ async function processImageVersion(versionId: string): Promise<void> {
         dollDesign: runtimeSettings.dollDesign,
         accessoryIds,
         selectedMaterials,
+        useExactMaterialReferences: Boolean(runtimeSettings.materialPlan),
         strictMaterialConstraint: runtimeSettings.strictMaterialConstraint,
         imageModelTier: runtimeSettings.imageModelTier,
         imageModel: runtimeSettings.imageModel,

@@ -19,25 +19,21 @@ import type {
 import { WatercolorPersonaGridSkeleton } from '../components/WatercolorLoader';
 import { MbtiAiGuidePanel } from '../components/MbtiAiGuidePanel';
 import { PortraitCapture } from '../components/PortraitCapture';
+import { MaterialPlanList } from '../components/MaterialPlanList';
 import { haptic } from '../lib/haptics';
+import { defaultMaterialIds, MATERIAL_CATEGORY_LABELS } from '../lib/materialCategories';
 
 type WizardStep = 1 | 2 | 3;
 
 const CATEGORY_ORDER: MaterialCategory[] = [
   'nut_body',
-  'yarn_hair',
+  'fruit_body',
   'fabric_outfit',
+  'yarn_hair',
+  'marine_charm',
   'hardware_charm',
   'dried_botanical',
 ];
-
-const CATEGORY_LABELS: Record<MaterialCategory, string> = {
-  nut_body: '天然果实主体',
-  yarn_hair: '毛线与发丝',
-  fabric_outfit: '布艺与服饰',
-  hardware_charm: '挂饰与五金',
-  dried_botanical: '干燥花草点缀',
-};
 
 const QUIZ_QUESTIONS = [
   { key: 'energy', text: '忙完一周，你更想怎样充电？', options: [['E', '和朋友聚一聚'], ['I', '自己安静待会儿']] },
@@ -101,6 +97,9 @@ export function CreatePage() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const idemKeyRef = useRef<string>(generateIdempotencyKey('card'));
+  const usesSuggestedDesign = photoRecommendation?.primaryPersonaId === personaId &&
+    photoRecommendation.suggestedMaterialIds.length === selectedAccessories.length &&
+    photoRecommendation.suggestedMaterialIds.every(id => selectedAccessories.includes(id));
 
   useEffect(() => {
     let active = true;
@@ -137,8 +136,8 @@ export function CreatePage() {
           const recommended = (initialPersona.recommendedMaterials ?? []).filter((id) => validIds.has(id));
           if (recommended.length > 0) {
             setSelectedAccessories(recommended.slice(0, 3));
-          } else if (aList.length > 0) {
-            setSelectedAccessories(aList.slice(0, 2).map((a) => a.id));
+          } else {
+            setSelectedAccessories(defaultMaterialIds(aList));
           }
         }
       } catch (error) {
@@ -276,7 +275,7 @@ export function CreatePage() {
       if (photoRecommendation?.photoStyle) {
         formData.set('photoStyle', photoRecommendation.photoStyle);
       }
-      if (photoRecommendation?.dollDesign && photoRecommendation.primaryPersonaId === personaId) {
+      if (photoRecommendation?.dollDesign && usesSuggestedDesign) {
         formData.set('dollDesign', photoRecommendation.dollDesign);
       }
 
@@ -310,19 +309,58 @@ export function CreatePage() {
     }
     return CATEGORY_ORDER.map((cat) => ({
       category: cat,
-      label: CATEGORY_LABELS[cat],
+      label: MATERIAL_CATEGORY_LABELS[cat],
       items: groups.get(cat) ?? [],
     })).filter((g) => g.items.length > 0);
   }, [accessories]);
 
+  const renderMaterialPicker = () => (
+    <div className="max-h-[340px] space-y-4 overflow-y-auto pr-1 lg:max-h-[410px]">
+      {groupedMaterials.map((group) => (
+        <section key={group.category} aria-label={group.label} className="space-y-2">
+          <h3 className="text-xs font-medium text-[#6E5C50]">{group.label}</h3>
+          <div className="grid grid-cols-2 gap-2">
+            {group.items.map((material) => {
+              const picked = selectedAccessories.includes(material.id);
+              return (
+                <button key={material.id} type="button" aria-pressed={picked} data-pressable="card"
+                  disabled={submitting || (!picked && selectedAccessories.length >= 6)}
+                  onClick={() => toggleAccessory(material.id)}
+                  className={`flex min-w-0 items-center gap-2 rounded-xl border p-2 text-left transition-colors disabled:opacity-60 ${picked
+                    ? 'border-[#4A8276] bg-[#EAF5F1] text-[#26544A]'
+                    : 'border-[#E6DDD0] bg-[#FFFEFC] text-[#382A22] hover:border-[#CFC4B5]'}`}>
+                  {material.referenceImageUrl && (
+                    <img src={material.referenceImageUrl} alt="" loading="lazy" decoding="async"
+                      className="h-11 w-11 shrink-0 rounded-lg border border-[#EFE7DC] bg-white object-contain sm:h-12 sm:w-12" />
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-xs font-medium leading-snug">{material.label}</span>
+                    {material.material !== material.label && (
+                      <span className="mt-0.5 block text-[10px] leading-snug text-[#756459]">{material.material}</span>
+                    )}
+                  </span>
+                  {picked && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />}
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+
   const renderGenerateAction = () => (
     <div className="flex-1 space-y-1.5">
-      <button type="submit" disabled={submitting || photoPreparing || recommending || !photoFile}
+      <button type="submit" disabled={submitting || photoPreparing || recommending || !photoFile || selectedAccessories.length === 0}
         className="btn-capsule-primary inline-flex min-h-11 w-full items-center justify-center gap-2 px-4 text-sm font-medium disabled:opacity-55">
         <Sparkles className="h-4 w-4" aria-hidden="true" />
         {submitting ? '正在提交绘制任务…' : '生成娃娃形象'}
       </button>
-      <p className="text-xs leading-relaxed text-[#6E5C50]">提交后，将参考照片和当前方案发送给生图服务。</p>
+      <p className="text-xs leading-relaxed text-[#6E5C50]">
+        {selectedAccessories.length
+          ? '参考照片和已选材料图会一起提交。严格实材模式下，娃娃的颜色和部件以选材为准。'
+          : '选好材料后可以生成娃娃形象。'}
+      </p>
     </div>
   );
 
@@ -332,11 +370,12 @@ export function CreatePage() {
       templates.find(template => template.recommendedMbti.some(mbti =>
         personas.find(persona => persona.mbti === mbti)?.mbtiGroup === activePersona.mbtiGroup
       )) ?? templates[0];
-    const suggestedRole = photoRecommendation.primaryPersonaId === activePersona.id;
     const materials = selectedAccessories.flatMap(id => {
       const item = accessories.find(accessory => accessory.id === id);
       return item ? [item] : [];
     });
+    const mainMaterial = materials.find(material => material.referenceImageUrl &&
+      (material.category === 'nut_body' || material.category === 'fruit_body'));
     const roles = [...new Set([photoRecommendation.primaryMbti, ...photoRecommendation.alternateMbtis, activePersona.mbti])];
     return (
       <section ref={draftRef} aria-labelledby="doll-draft-title"
@@ -346,7 +385,13 @@ export function CreatePage() {
           <p className="mt-1 text-xs leading-relaxed text-[#6E5C50]">性格是娃娃的创作设定，可以按你的喜好调整。</p>
         </div>
         <div className="grid items-start gap-3 min-[440px]:grid-cols-[6rem_minmax(0,1fr)]">
-          {reference && (
+          {mainMaterial?.referenceImageUrl ? (
+            <figure className="max-w-36">
+              <img src={mainMaterial.referenceImageUrl} alt={mainMaterial.label}
+                className="aspect-square w-full rounded-xl bg-white object-contain" />
+              <figcaption className="mt-1 text-[11px] text-[#6E5C50]">{mainMaterial.label}</figcaption>
+            </figure>
+          ) : reference && (
             <figure className="max-w-36">
               <img src={reference.imageUrl} alt={reference.name} className="aspect-square w-full rounded-xl object-cover" />
               <figcaption className="mt-1 text-[11px] text-[#6E5C50]">工坊参考样式</figcaption>
@@ -356,32 +401,26 @@ export function CreatePage() {
             <p className="text-sm font-semibold text-[#382A22]">{activePersona.name} · {activePersona.mbti}</p>
             <p className="text-sm leading-relaxed text-[#524339]">{photoRecommendation.photoStyle}</p>
             <p className="text-sm leading-relaxed text-[#524339]">
-              {suggestedRole ? photoRecommendation.dollDesign : activePersona.visualTrait || activePersona.materialHint}
+              {usesSuggestedDesign ? photoRecommendation.dollDesign : activePersona.tagline}
             </p>
           </div>
         </div>
-        {suggestedRole && <p className="text-xs leading-relaxed text-[#6E5C50]">{photoRecommendation.reason}</p>}
-        {materials.length > 0 && (
-          <ul aria-label="已准备的材料" className="flex flex-wrap gap-1.5">
-            {materials.map(material => (
-              <li key={material.id} className="rounded-full bg-white px-2.5 py-1 text-xs text-[#26544A]">{material.label}</li>
-            ))}
-          </ul>
-        )}
+        {usesSuggestedDesign && <p className="text-xs leading-relaxed text-[#6E5C50]">{photoRecommendation.reason}</p>}
+        {materials.length > 0 && <MaterialPlanList materials={materials} />}
         <div className="flex flex-wrap items-center gap-2" aria-label="调整娃娃性格">
           <span className="text-xs text-[#6E5C50]">换个性格</span>
           {roles.map(mbti => (
             <button key={mbti} type="button" disabled={submitting} aria-pressed={activePersona.mbti === mbti}
               className="btn-paper-soft min-h-8 px-2.5 text-xs font-mono aria-pressed:bg-[#D8EBE3]"
-              onClick={() => {
-                const persona = personas.find(item => item.mbti === mbti);
-                const items = mbti === photoRecommendation.primaryMbti
-                  ? photoRecommendation.suggestedMaterialIds
-                  : persona?.recommendedMaterials;
-                applyPersonaSelection(mbti, items);
-              }}>{mbti}</button>
+              onClick={() => applyPersonaSelection(mbti)}>{mbti}</button>
           ))}
         </div>
+        <details className="space-y-2 border-t border-[#D8E6DF] pt-2">
+          <summary className="cursor-pointer text-xs font-medium text-[#3D7267]">
+            调整材料 · 已选 {selectedAccessories.length}/6
+          </summary>
+          {renderMaterialPicker()}
+        </details>
         {creationEnabled ? renderGenerateAction() : (
           <p className="text-xs text-[#6E5C50]">完整定制出图待开放</p>
         )}
@@ -657,11 +696,11 @@ export function CreatePage() {
         <div className="flex items-baseline gap-2">
           <span className="font-atelier-num italic text-[14px] text-[#4A8276]">03.</span>
           <h2 className="font-editorial text-base font-semibold text-[#382A22]">
-            在库手作材料（最多 6 项）
+            工坊材料（最多 6 项）
           </h2>
         </div>
         <div className="flex items-center gap-2.5">
-          {activePersona && (activePersona.recommendedMaterials?.length ?? 0) > 0 && (
+          {activePersona?.recommendedMaterials?.some(id => accessories.some(material => material.id === id)) && (
             <button
               type="button"
               onClick={applyRecommendedMaterials}
@@ -677,48 +716,10 @@ export function CreatePage() {
       </div>
 
       <p className="text-[11.5px] text-[#8E7C6E] leading-relaxed">
-        材料来自工坊库存，生成娃娃形象时会用作造型参考。
+        所选材料会作为娃娃造型的参考。
       </p>
 
-      <div className="space-y-3 max-h-[340px] lg:max-h-[370px] overflow-y-auto pr-1">
-        {groupedMaterials.map((group) => (
-          <div key={group.category} className="space-y-1.5">
-            <div className="text-[11px] font-medium text-[#8E7C6E] tracking-wide">
-              {group.label}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {group.items.map((acc) => {
-                const picked = selectedAccessories.includes(acc.id);
-                const isRecommended = activePersona?.recommendedMaterials?.includes(acc.id);
-                return (
-                  <button
-                    key={acc.id}
-                    type="button"
-                    data-pressable="card"
-                    onClick={() => toggleAccessory(acc.id)}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-left transition-all ${
-                      picked
-                        ? 'border-[#4A8276] bg-[#EAF5F1] text-[#26544A] shadow-[0_2px_8px_-2px_rgba(74,130,118,0.22)]'
-                        : 'border-[#E6DDD0] bg-[#FFFEFC] hover:border-[#CFC4B5] text-[#382A22]'
-                    }`}
-                  >
-                    <span className="text-[12px] font-medium whitespace-nowrap">{acc.label}</span>
-                    <span className="text-[10.5px] text-[#9A887B] whitespace-nowrap">
-                      {acc.material}
-                    </span>
-                    {isRecommended && !picked && (
-                      <span className="text-[10px] text-[#C9963B] font-medium">荐</span>
-                    )}
-                    {picked && (
-                      <Check className="w-3.5 h-3.5 shrink-0 text-[#4A8276]" strokeWidth={2.4} />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </div>
+      {renderMaterialPicker()}
 
       {/* Compact Configuration Summary */}
       <div className="p-3 rounded-xl studio-inset flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] text-[#6E5C50]">
@@ -767,6 +768,12 @@ export function CreatePage() {
             {renderPortraitTools()}
             {renderPreparedDoll()}
           </section>
+        )}
+        {!loadError && !photoRecommendation && (
+          <details className="studio-card space-y-3 rounded-[20px] p-4 sm:p-5">
+            <summary className="cursor-pointer text-sm font-medium text-[#3D7267]">工坊材料图册</summary>
+            {renderMaterialPicker()}
+          </details>
         )}
         {!loadError && (photoMbtiEnabled ? (
           <details className="studio-card rounded-[20px] p-4 sm:p-5"

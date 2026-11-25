@@ -15,6 +15,7 @@ import {
 import { api, ApiError, generateIdempotencyKey } from '../lib/api';
 import type { CardDetail, FallbackTemplate, OutputJob } from '../lib/types';
 import { SafeImage } from '../components/SafeImage';
+import { MaterialPlanList } from '../components/MaterialPlanList';
 import { WatercolorCardDetailSkeleton } from '../components/WatercolorLoader';
 import { haptic } from '../lib/haptics';
 
@@ -451,6 +452,13 @@ export function CardDetailPage() {
                 </div>
               </div>
             )}
+            {selectedVersion?.status === 'succeeded' && selectedVersion.resultKind === 'generated' &&
+              card.materialPlan && card.materialPlan.length > 0 && (
+                <section className="space-y-2 border-t border-[#EAE2D6] bg-[#F7F5EE] p-5">
+                  <h2 className="text-sm font-semibold text-[#382A22]">这张图的选材</h2>
+                  <MaterialPlanList materials={card.materialPlan} />
+                </section>
+              )}
           </div>
 
           {/* Version History Strip */}

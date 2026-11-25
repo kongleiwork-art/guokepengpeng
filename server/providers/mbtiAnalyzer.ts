@@ -2,6 +2,7 @@ import { config, isChatCloudConfigured, isPhotoMbtiEnabled } from '../config.ts'
 import { requestStepFunJson } from './stepfun.ts';
 import { PERSONA_SEEDS } from '../data/seed.ts';
 import type { MaterialRecord } from '../db.ts';
+import { defaultMaterialIds, materialPart } from '../../src/lib/materialCategories.ts';
 
 export interface MbtiQuizAnswers {
   energy?: 'E' | 'I';
@@ -63,7 +64,7 @@ function buildDeterministicQuizRecommendation(
     alternateMbtis: alternates.slice(0, 2),
     keywords: [primary.mbti, primary.name, primary.mbtiGroup === 'NF' ? '疗愈直觉' : primary.mbtiGroup === 'NT' ? '理性洞察' : primary.mbtiGroup === 'SJ' ? '温柔守护' : '自在行动'],
     reason: `根据你的 4 题选择，你呈现出${axisNotes.slice(0, 2).join('、')}，同时兼具${axisNotes.slice(2).join('与')}，与「${primary.name}（${primary.mbti}）」最为契合。`,
-    suggestedMaterialIds,
+    suggestedMaterialIds: suggestedMaterialIds.length ? suggestedMaterialIds : defaultMaterialIds(inStockMaterials).slice(0, 3),
     source: 'quiz_rule',
   };
 }
@@ -106,7 +107,7 @@ export async function recommendMbti(input: {
   ).join('\n');
 
   const materialsCatalog = input.inStockMaterials
-    .map((m) => hasPhoto ? `${m.id}=${m.label}` : `${m.id}: ${m.label}（${m.material}）`)
+    .map((m) => hasPhoto ? `${m.id}=${m.label}${m.referenceImageUrl ? '〔材料包〕' : ''}` : `${m.id}: ${m.label}（${m.material}）`)
     .join('\n');
 
   const quizDesc = hasQuiz && input.quizAnswers
@@ -123,7 +124,7 @@ export async function recommendMbti(input: {
     '【可选的 16 型果壳人格】',
     personaCatalog,
     '',
-    '【当前工坊在库手作材料（仅可从以下 ID 中挑选 2–3 个推荐）】',
+    hasPhoto ? '【工坊可用材料，从以下 ID 中挑 2 到 5 项】' : '【工坊可用材料，从以下 ID 中挑 2 到 3 项】',
     materialsCatalog || '暂无在库材料',
     '',
     '要求：',
@@ -131,8 +132,8 @@ export async function recommendMbti(input: {
     '2. alternateMbtis 返回 2 个与 primaryMbti 不同的备选 4 字母 MBTI。',
     '3. keywords 返回 3 个简短温暖的中文氛围词（每个 2–5 字）。',
     '4. reason 用 2 句自然、有手作温度的中文解释为什么这个果壳人格和Ta很搭。',
-    '5. suggestedMaterialIds 必须严格从上面列出的在库材料 ID 中挑选 2–3 个。',
-    hasPhoto ? '6. photoStyle 简短描述照片中最明显的可见风格。dollDesign 用一句话构思娃娃的主体、配色与在库配饰。reason 说明为何选择这种娃娃角色。' : '',
+    '5. suggestedMaterialIds 必须全部来自上面列出的 ID。',
+    hasPhoto ? '6. photoStyle 简述照片风格。dollDesign 用一句话说明所选材料分别做什么部位，只用 suggestedMaterialIds 对应的材料和它们已有的颜色。优先选一个果壳或果实作主体。照片仅提供角色灵感。' : '',
   ].join('\n');
 
   const content = hasPhoto
@@ -185,14 +186,16 @@ export async function recommendMbti(input: {
     validAlts.push(candidate.mbti);
   }
 
-  let validMaterials = (Array.isArray(parsed.suggestedMaterialIds) ? parsed.suggestedMaterialIds : [])
+  const recommendedMaterials = [...new Set((Array.isArray(parsed.suggestedMaterialIds) ? parsed.suggestedMaterialIds : [])
     .map(String)
-    .filter((id) => inStockSet.has(id))
-    .slice(0, 3);
-
-  if (validMaterials.length === 0) {
-    validMaterials = primary.recommendedMaterials.filter((id) => inStockSet.has(id)).slice(0, 3);
-  }
+    .filter((id) => inStockSet.has(id)))].slice(0, hasPhoto ? 5 : 3);
+  const personaMaterials = primary.recommendedMaterials.filter((id) => inStockSet.has(id)).slice(0, 3);
+  const fallbackMaterials = personaMaterials.length ? personaMaterials : defaultMaterialIds(input.inStockMaterials).slice(0, hasPhoto ? 5 : 3);
+  const validMaterials = recommendedMaterials.length ? recommendedMaterials : fallbackMaterials;
+  const fallbackDesign = validMaterials.flatMap(id => {
+    const material = input.inStockMaterials.find(item => item.id === id);
+    return material ? [`${material.label}做${materialPart(id, material.category)}`] : [];
+  }).join('，');
 
   const keywords = (Array.isArray(parsed.keywords) ? parsed.keywords : [])
     .map((k) => String(k).trim())
@@ -206,7 +209,7 @@ export async function recommendMbti(input: {
     keywords: keywords.length > 0 ? keywords : [primary.mbti, primary.name, '手作共鸣'],
     reason: (typeof parsed.reason === 'string' && parsed.reason.trim() || primary.tagline).slice(0, 240),
     suggestedMaterialIds: validMaterials,
-    ...(hasPhoto ? { photoStyle, dollDesign } : {}),
+    ...(hasPhoto ? { photoStyle, dollDesign: recommendedMaterials.length ? dollDesign : fallbackDesign } : {}),
     source: hasPhoto ? 'cloud_vision' : 'cloud_quiz',
   };
 }

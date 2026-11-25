@@ -1,7 +1,9 @@
 export type MaterialCategory =
   | 'nut_body'
+  | 'fruit_body'
   | 'yarn_hair'
   | 'fabric_outfit'
+  | 'marine_charm'
   | 'hardware_charm'
   | 'dried_botanical';
 
@@ -36,6 +38,7 @@ export interface AccessoryOption {
   categoryLabel?: string;
   material: string;
   visualHint?: string;
+  referenceImageUrl?: string;
   inStock?: boolean;
 }
 
@@ -45,6 +48,7 @@ export interface MaterialRecord {
   category: MaterialCategory;
   material: string;
   visualHint: string;
+  referenceImageUrl?: string;
   inStock: boolean;
   sortOrder: number;
   createdAt?: string;
@@ -234,6 +238,7 @@ export interface CardDetail {
   persona: PersonaPublic;
   accessoryIds: string[];
   accessoryLabels: string[];
+  materialPlan?: AccessoryOption[];
   activeVersionId: string | null;
   boundDollId: string | null;
   boundDoll: {

@@ -18,13 +18,14 @@ import {
 } from '../config.ts';
 import {
   FALLBACK_TEMPLATES,
-  MATERIAL_CATEGORY_LABELS,
   type MaterialCategory,
 } from '../data/seed.ts';
+import { MATERIAL_CATEGORY_LABELS } from '../../src/lib/materialCategories.ts';
 import {
   db,
   getMaterialsByIds,
   getRuntimeSettings,
+  listCreationMaterials,
   listMaterials,
   recordRunLog,
   setRuntimeSetting,
@@ -79,13 +80,7 @@ const uploadPhoto: express.RequestHandler = (req, res, next) => {
   });
 };
 
-const VALID_MATERIAL_CATEGORIES = new Set<MaterialCategory>([
-  'nut_body',
-  'yarn_hair',
-  'fabric_outfit',
-  'hardware_charm',
-  'dried_botanical',
-]);
+const VALID_MATERIAL_CATEGORIES = new Set(Object.keys(MATERIAL_CATEGORY_LABELS) as MaterialCategory[]);
 
 function hashObject(obj: unknown): string {
   return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex');
@@ -360,7 +355,8 @@ router.get('/personas', ensureSession, async (_req, res) => {
 });
 
 router.get('/accessories', ensureSession, async (_req, res) => {
-  const inStockMaterials = await listMaterials(true);
+  const { strictMaterialConstraint } = await getRuntimeSettings();
+  const inStockMaterials = await listCreationMaterials(strictMaterialConstraint);
   sendSuccess(
     res,
     inStockMaterials.map((m) => ({
@@ -370,6 +366,7 @@ router.get('/accessories', ensureSession, async (_req, res) => {
       categoryLabel: MATERIAL_CATEGORY_LABELS[m.category] || '手作材料',
       material: m.material,
       visualHint: m.visualHint,
+      referenceImageUrl: m.referenceImageUrl,
       inStock: m.inStock,
     }))
   );
@@ -429,7 +426,7 @@ router.post('/mbti/recommend', ensureSession, uploadPhoto, async (req, res) => {
 
   try {
     const settings = await getRuntimeSettings();
-    const inStockMaterials = await listMaterials(true);
+    const inStockMaterials = await listCreationMaterials(settings.strictMaterialConstraint);
     const result = await recommendMbti({
       photoBuffer,
       photoMime,
@@ -479,7 +476,7 @@ router.post('/mbti/guide/turn', ensureSession, async (req, res) => {
     const forceConclude = Boolean(req.body?.forceConclude);
 
     const settings = await getRuntimeSettings();
-    const inStockMaterials = await listMaterials(true);
+    const inStockMaterials = await listCreationMaterials(settings.strictMaterialConstraint);
     const result = await runMbtiGuideTurn({
       history,
       rawScores,
@@ -1228,10 +1225,13 @@ router.post('/cards', ensureSession, uploadPhoto, async (req, res) => {
     }
   }
 
-  // Validate against live in-stock SQLite craft materials
-  const inStockMaterials = await listMaterials(true);
-  const validMaterialSet = new Set(inStockMaterials.map((m) => m.id));
-  accessoryIds = Array.from(new Set(accessoryIds.filter((id) => validMaterialSet.has(id)))).slice(0, 6);
+  const settings = await getRuntimeSettings();
+  const inStockMaterials = await listCreationMaterials(settings.strictMaterialConstraint);
+  const materialsById = new Map(inStockMaterials.map(material => [material.id, material]));
+  accessoryIds = [...new Set(accessoryIds)];
+  if (!settings.strictMaterialConstraint) {
+    accessoryIds = accessoryIds.filter(id => materialsById.has(id)).slice(0, 6);
+  }
 
   if (!req.file?.buffer) {
     sendError(req, res, 400, 'INVALID_INPUT', '请上传一张 JPEG、PNG 或 WebP 照片');
@@ -1272,7 +1272,13 @@ router.post('/cards', ensureSession, uploadPhoto, async (req, res) => {
     return;
   }
 
-  const settings = await getRuntimeSettings();
+  if (settings.strictMaterialConstraint && (
+    accessoryIds.length === 0 || accessoryIds.length > 6 || accessoryIds.some(id => !materialsById.has(id))
+  )) {
+    sendError(req, res, 400, 'MATERIAL_REFERENCES_REQUIRED', '请选择 1 到 6 种有参考图的可用材料');
+    return;
+  }
+  const materialPlan = settings.strictMaterialConstraint ? accessoryIds.map(id => materialsById.get(id)!) : undefined;
   const provider = settings.imageProviderMode;
   if (provider === 'cloud' && !isImageCloudConfigured(settings.imageVendor)) {
     sendError(req, res, 503, 'PROVIDER_NOT_CONFIGURED', '当前生图服务尚未配置密钥');
@@ -1301,7 +1307,7 @@ router.post('/cards', ensureSession, uploadPhoto, async (req, res) => {
       `INSERT INTO card_versions (id, card_id, version_number, status, provider, result_kind, created_at, image_settings, simulate_fail)
        VALUES (?, ?, 1, 'queued', ?, ?, ?, ?, ?)`
     ).run(versionId, cardId, provider, provider === 'cloud' ? 'generated' : 'mock', timestamp,
-      snapshotImageSettings({ ...settings, photoStyle, dollDesign }), Number(provider === 'mock' && simulateFail));
+      snapshotImageSettings({ ...settings, photoStyle, dollDesign, materialPlan }), Number(provider === 'mock' && simulateFail));
     return { data: {
       cardId, versionId, status: 'queued', provider,
       imageModelTier: settings.imageModelTier,
@@ -1373,6 +1379,13 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
   }
 
   const parsedAccIds = JSON.parse(String(card.accessory_ids || '[]')) as string[];
+  const settingsSnapshot = versionRows[0]?.image_settings;
+  const originalSettings = typeof settingsSnapshot === 'string'
+    ? JSON.parse(settingsSnapshot) as ImageSettings | null
+    : null;
+  const materialPlan = originalSettings?.materialPlan?.map(({ id, label, category, material, referenceImageUrl }) => ({
+    id, label, category, material, referenceImageUrl,
+  }));
 
   sendSuccess(res, {
     id: card.id,
@@ -1386,7 +1399,8 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
       materialHint: card.persona_material_hint,
     },
     accessoryIds: parsedAccIds,
-    accessoryLabels: await resolveMaterialLabels(parsedAccIds),
+    accessoryLabels: materialPlan?.map(item => item.label) ?? await resolveMaterialLabels(parsedAccIds),
+    materialPlan,
     activeVersionId: card.active_version_id,
     boundDollId: card.bound_doll_id ?? null,
     boundDoll,
@@ -1534,6 +1548,7 @@ router.post('/cards/:id/redraw', ensureSession, async (req, res) => {
       : null;
     const imageSettings = snapshotImageSettings({
       ...runtimeSettings, photoStyle: initialSettings?.photoStyle, dollDesign: initialSettings?.dollDesign,
+      materialPlan: initialSettings?.materialPlan,
     });
 
     await db.prepare(

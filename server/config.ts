@@ -45,8 +45,8 @@ export const IMAGE_TIER_LABELS: Record<ImageModelTier, string> = {
 
 export const IMAGE_MODELS: Record<ImageVendor, Record<ImageModelTier, string>> = {
   openai: {
-    fast: process.env.OPENAI_IMAGE_MODEL?.trim() || 'gpt-image-1.5',
-    hd: process.env.OPENAI_IMAGE_HD_MODEL?.trim() || process.env.OPENAI_IMAGE_MODEL?.trim() || 'gpt-image-1.5',
+    fast: process.env.OPENAI_IMAGE_MODEL?.trim() || 'gpt-image-2.6-flare',
+    hd: process.env.OPENAI_IMAGE_HD_MODEL?.trim() || process.env.OPENAI_IMAGE_MODEL?.trim() || 'gpt-image-2.6-sunburst',
   },
   gemini: {
     fast: process.env.GEMINI_IMAGE_MODEL?.trim() || process.env.IMAGE_MODEL?.trim() || 'gemini-2.5-flash-image',

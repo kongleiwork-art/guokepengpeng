@@ -34,6 +34,8 @@ Vite 构建前端。Express API 和 NFC 跳转运行在 Vercel Functions。预�
 
 取景使用 [MediaPipe Face Detector](https://developers.google.com/edge/mediapipe/solutions/vision/face_detector?tab=Web)。模型和运行文件随站点发布。
 
+工坊材料图册包含团队素材包中的 55 种彩色材料图。已有数据库会追加这些条目，工坊可在 `/dev` 更新可用状态。出图请求仅附带本次选中的材料参考图。
+
 开放定制的环境使用 `OPENAI_API_KEY` 配置 GPT Image。工坊人员可在 `/dev` 手动切换至 Nano Banana，凭据使用 `GEMINI_API_KEY`。任务保存提交时的模型与质量档位。远程结果未知时，核对服务商的结果与费用后方可继续提交。原始照片保留 24 小时，已生成的作品按作品权限读取。
 
 ### NFC 写签和检查

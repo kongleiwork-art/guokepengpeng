@@ -12,6 +12,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 const project = new URL('../', import.meta.url);
 const photo = await readFile(new URL('src/assets/images/doll_acorn_enfp_1795174377785.jpg', project));
 const output = await readFile(new URL('src/assets/images/doll_chestnut_intj_1795174377952.jpg', project));
+const acornArtwork = await readFile(new URL('public/assets/materials/capped_acorn.webp', project));
+const cottonArtwork = await readFile(new URL('public/assets/materials/cloud_cotton.webp', project));
+const walnutArtwork = await readFile(new URL('public/assets/materials/walnut.webp', project));
 
 async function startApp(t, dir, settings) {
   const child = spawn(process.execPath, ['server.ts'], {
@@ -56,7 +59,7 @@ test('Gemini 参考图创作、绑定与首次初始化后重启', { timeout: 30
   gemini.listen(0, '127.0.0.1');
   await once(gemini, 'listening');
   t.after(() => new Promise((resolve) => gemini.close(resolve)));
-  const settings = { IMAGE_PROVIDER: '', IMAGE_VENDOR: 'gemini', GEMINI_API_KEY: 'fixture', IMAGE_MODEL: 'fixture-model',
+  const settings = { IMAGE_PROVIDER: '', IMAGE_VENDOR: 'gemini', GEMINI_API_KEY: 'fixture', GEMINI_IMAGE_MODEL: 'gemini-2.5-flash-image',
     GEMINI_IMAGE_BASE_URL: 'http://127.0.0.1:' + gemini.address().port };
   const app = await startApp(t, dir, settings);
   let base = app.base;
@@ -72,14 +75,25 @@ test('Gemini 参考图创作、绑定与首次初始化后重启', { timeout: 30
   assert.equal(dolls.length, 4);
   for (const doll of dolls) assert.equal((await owner(doll.avatarUrl)).headers.get('content-type'), 'image/jpeg');
   assert.equal((await json(await owner('/api/templates'))).length, 4);
-  assert.ok((await json(await owner('/api/accessories'))).some((item) => item.id === 'hat_gingham'));
+  const materials = await json(await owner('/api/accessories'));
+  assert.ok(!materials.some((item) => item.id === 'hat_gingham'));
+  assert.ok((await json(await owner('/api/materials'))).items.some((item) => item.id === 'hat_gingham'));
+  assert.equal(materials.filter(item => item.referenceImageUrl).length, 55);
+  const acorn = materials.find(item => item.id === 'kit_capped_acorn');
+  assert.equal(acorn.category, 'fruit_body');
+  assert.deepEqual(Buffer.from(await (await owner(acorn.referenceImageUrl)).arrayBuffer()), acornArtwork);
 
   const form = new FormData();
   form.set('photo', new Blob([photo], { type: 'image/jpeg' }), 'reference.jpg');
   form.set('personaId', 'persona_enfp');
   form.set('userNickname', '小林');
-  form.set('accessoryIds', JSON.stringify(['hat_gingham']));
+  form.set('accessoryIds', JSON.stringify(['hat_gingham', 'kit_capped_acorn']));
   const submit = () => owner('/api/cards', { method: 'POST', headers: { 'Idempotency-Key': 'first' }, body: form });
+  const incomplete = await submit();
+  assert.equal(incomplete.status, 400);
+  assert.equal((await incomplete.json()).error.code, 'MATERIAL_REFERENCES_REQUIRED');
+  assert.equal(calls.length, 0);
+  form.set('accessoryIds', JSON.stringify(['kit_capped_acorn', 'kit_walnut', 'kit_cloud_cotton']));
   const card = await json(await submit(), 202);
   assert.equal((await json(await submit(), 202)).versionId, card.versionId);
 
@@ -96,10 +110,13 @@ test('Gemini 参考图创作、绑定与首次初始化后重启', { timeout: 30
   assert.equal(first.resultKind, 'generated');
   assert.equal(first.providerRequestId, 'fixture-1');
   const call = calls[0];
-  assert.equal(call.path, '/v1beta/models/fixture-model:generateContent');
+  assert.equal(call.path, '/v1beta/models/gemini-2.5-flash-image:generateContent');
   assert.equal(call.key, 'fixture');
   assert.deepEqual(call.contents[0].parts[0].inlineData, { mimeType: 'image/jpeg', data: photo.toString('base64') });
-  assert.match(call.contents[0].parts[1].text, /ENFP.*格纹布帽/);
+  assert.deepEqual(call.contents[0].parts[1].inlineData, { mimeType: 'image/webp', data: acornArtwork.toString('base64') });
+  assert.deepEqual(call.contents[0].parts[2].inlineData, { mimeType: 'image/webp', data: walnutArtwork.toString('base64') });
+  assert.deepEqual(call.contents[0].parts[3].inlineData, { mimeType: 'image/webp', data: cottonArtwork.toString('base64') });
+  assert.match(call.contents[0].parts[4].text, /Input image 3: 核桃壳.*Part: 身体/);
   assert.ok(call.generationConfig.responseModalities.includes('IMAGE'));
   assert.equal(call.generationConfig.imageConfig.aspectRatio, '3:4');
   assert.deepEqual(Buffer.from(await (await owner(first.resultUrl)).arrayBuffer()), output);
@@ -206,7 +223,7 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
   assert.equal(brief.source, 'cloud_vision');
   assert.equal(brief.primaryPersonaId, 'persona_infp');
   assert.match(brief.photoStyle, /暖棕/);
-  assert.match(brief.dollDesign, /胡桃壳/);
+  assert.match(brief.dollDesign, /核桃壳做身体/);
   assert.ok(brief.suggestedMaterialIds.length > 0);
   assert.ok(!brief.suggestedMaterialIds.includes('absent_material'));
   assert.equal(requests[0].model, 'step-5-preview');
@@ -238,7 +255,7 @@ test('StepFun SSE、照片方案接 GPT 生图、会话隔离和任务幂等', {
           choices: [{ message: { content: JSON.stringify({
             primaryMbti: 'ENFP', reason: '一起试试新点子。', alternateMbtis: ['INFP', 'ENFJ'], keywords: ['好奇'],
             photoStyle: '苔绿色搭配浅棕色', dollDesign: '用浅棕橡果壳和苔绿织物做娃娃',
-            suggestedMaterialIds: ['hat_gingham'],
+            suggestedMaterialIds: ['kit_capped_acorn', 'kit_cloud_cotton', 'kit_capped_acorn'],
           }) } }],
         }));
         return;
@@ -311,6 +328,7 @@ test('StepFun SSE、照片方案接 GPT 生图、会话隔离和任务幂等', {
   portrait.set('photo', new Blob([photo], { type: 'image/jpeg' }), 'reference.jpg');
   const brief = await json(await owner('/api/mbti/recommend', { method: 'POST', body: portrait }));
   assert.equal(brief.source, 'cloud_vision');
+  assert.deepEqual(brief.suggestedMaterialIds, ['kit_capped_acorn', 'kit_cloud_cotton']);
   assert.equal(calls.image.length, 0);
 
   const create = (dollDesign = brief.dollDesign) => {
@@ -338,6 +356,9 @@ test('StepFun SSE、照片方案接 GPT 生图、会话隔离和任务幂等', {
   };
   const version = await waitFor('/api/card-versions/' + first.versionId);
   assert.equal(version.status, 'succeeded', version.errorMessage);
+  const detail = await json(await owner('/api/cards/' + first.cardId));
+  assert.deepEqual(detail.materialPlan.map(item => item.id), brief.suggestedMaterialIds);
+  assert.ok(detail.materialPlan.every(item => item.referenceImageUrl));
   assert.equal(calls.image.length, 1);
   assert.equal(calls.image[0].auth, 'Bearer fixture');
   assert.match(calls.image[0].type, /multipart\/form-data/);
@@ -345,7 +366,13 @@ test('StepFun SSE、照片方案接 GPT 生图、会话隔离和任务幂等', {
   assert.ok(calls.image[0].body.includes(photo));
   assert.ok(calls.image[0].body.includes(brief.photoStyle));
   assert.ok(calls.image[0].body.includes(brief.dollDesign));
-  assert.ok(calls.image[0].body.includes('格纹布帽'));
+  assert.ok(calls.image[0].body.includes('gpt-image-2.6-flare'));
+  assert.ok(calls.image[0].body.includes('Input image 2: 带帽橡果'));
+  assert.ok(calls.image[0].body.includes('Input image 3: 云朵棉面料'));
+  assert.ok(calls.image[0].body.includes('The material list below is exhaustive'));
+  assert.ok(calls.image[0].body.includes(acornArtwork));
+  assert.ok(calls.image[0].body.includes(cottonArtwork));
+  assert.equal(calls.image[0].body.toString().match(/name="image\[\]"/g).length, 3);
   assert.equal((await fetch(base + version.resultUrl)).status, 404);
   assert.equal((await owner(version.resultUrl)).status, 200);
 
@@ -366,4 +393,5 @@ test('StepFun SSE、照片方案接 GPT 生图、会话隔离和任务幂等', {
   assert.equal((await blocked.json()).error.code, 'GENERATION_REVIEW_REQUIRED');
   assert.equal(calls.image.length, 2);
   assert.ok(calls.image[1].body.includes(brief.dollDesign));
+  assert.ok(calls.image[1].body.includes(acornArtwork));
 });
