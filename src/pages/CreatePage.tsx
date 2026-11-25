@@ -81,6 +81,7 @@ export function CreatePage() {
   const [personaMode, setPersonaMode] = useState<'ai_guide' | 'manual' | 'quiz'>(
     presetPersonaId ? 'manual' : 'ai_guide'
   );
+  const [aiGuideOpened, setAiGuideOpened] = useState(false);
   const [showAllPersonas, setShowAllPersonas] = useState(false);
   const [selectedAccessories, setSelectedAccessories] = useState<string[]>([]);
 
@@ -109,7 +110,9 @@ export function CreatePage() {
         if (!active) return;
         setCreationEnabled(capabilities.imageGenerationEnabled);
         setPhotoMbtiEnabled(capabilities.photoMbtiEnabled);
-        if (capabilities.photoMbtiEnabled) setPersonaMode('manual');
+        const startWithGuide = !capabilities.photoMbtiEnabled && !presetPersonaId;
+        setPersonaMode(startWithGuide ? 'ai_guide' : 'manual');
+        setAiGuideOpened(startWithGuide);
         await api.initSession();
         const [pList, aList, references] = await Promise.all([
           api.listPersonas(),
@@ -455,6 +458,7 @@ export function CreatePage() {
             onClick={() => {
               haptic('selection');
               setPersonaMode('ai_guide');
+              setAiGuideOpened(true);
             }}
             className={`px-2.5 py-1 text-[11.5px] font-medium rounded-lg transition-colors whitespace-nowrap ${
               personaMode === 'ai_guide'
@@ -485,9 +489,9 @@ export function CreatePage() {
         </div>
       </div>
 
-      {/* Mode A: High-Accuracy AI Jungian 8-Function Adaptive Interview (kept mounted when active) */}
+      {/* Keep interview progress when switching tabs after opening it. */}
       <div className={personaMode === 'ai_guide' ? 'block space-y-3' : 'hidden'}>
-        <MbtiAiGuidePanel onApplyPersona={applyPersonaSelection} />
+        {aiGuideOpened && <MbtiAiGuidePanel onApplyPersona={applyPersonaSelection} />}
       </div>
 
       {personaMode === 'quiz' && (
