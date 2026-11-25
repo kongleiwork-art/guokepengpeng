@@ -22,7 +22,8 @@ async function startApp(t, dir, settings) {
     env: {
       ...process.env, NODE_ENV: 'production', HOST: '127.0.0.1', PORT: '0',
       DATABASE_URL: path.join(dir, 'test.sqlite'), STORAGE_PATH: path.join(dir, 'files'),
-      SESSION_SECRET: '', DEMO_ADMIN_TOKEN: '', IMAGE_API_KEY: '', CHAT_PROVIDER: 'mock', ...settings,
+      SESSION_SECRET: '', DEMO_ADMIN_TOKEN: '', IMAGE_API_KEY: '', CHAT_PROVIDER: 'mock',
+      STEPFUN_API_KEY: '', STEPFUN_VISION_MODEL: '', ...settings,
     },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -112,11 +113,10 @@ test('Gemini 参考图创作、绑定与首次初始化后重启', { timeout: 30
   const call = calls[0];
   assert.equal(call.path, '/v1beta/models/gemini-2.5-flash-image:generateContent');
   assert.equal(call.key, 'fixture');
-  assert.deepEqual(call.contents[0].parts[0].inlineData, { mimeType: 'image/jpeg', data: photo.toString('base64') });
-  assert.deepEqual(call.contents[0].parts[1].inlineData, { mimeType: 'image/webp', data: acornArtwork.toString('base64') });
-  assert.deepEqual(call.contents[0].parts[2].inlineData, { mimeType: 'image/webp', data: walnutArtwork.toString('base64') });
-  assert.deepEqual(call.contents[0].parts[3].inlineData, { mimeType: 'image/webp', data: cottonArtwork.toString('base64') });
-  assert.match(call.contents[0].parts[4].text, /Input image 3: 核桃壳.*Part: 身体/);
+  assert.deepEqual(call.contents[0].parts[0].inlineData, { mimeType: 'image/webp', data: acornArtwork.toString('base64') });
+  assert.deepEqual(call.contents[0].parts[1].inlineData, { mimeType: 'image/webp', data: walnutArtwork.toString('base64') });
+  assert.deepEqual(call.contents[0].parts[2].inlineData, { mimeType: 'image/webp', data: cottonArtwork.toString('base64') });
+  assert.match(call.contents[0].parts[3].text, /Input image 2: 核桃壳.*Part: 身体/);
   assert.ok(call.generationConfig.responseModalities.includes('IMAGE'));
   assert.equal(call.generationConfig.imageConfig.aspectRatio, '3:4');
   assert.deepEqual(Buffer.from(await (await owner(first.resultUrl)).arrayBuffer()), output);
@@ -236,15 +236,25 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
   assert.equal(requests.length, 1);
 });
 
-test('StepFun SSE、照片方案接 GPT 生图、会话隔离和任务幂等', { timeout: 30000 }, async (t) => {
+test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { timeout: 30000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'nutshell-providers-'));
-  const calls = { chat: [], image: [] };
+  const calls = { chat: [], image: [], review: [] };
   const fixture = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = Buffer.concat(chunks);
     if (req.url === '/v1/chat/completions') {
       const payload = JSON.parse(body);
+      if (payload.messages[0].content.includes('成品材料验收')) {
+        calls.review.push(payload);
+        const review = calls.review.length === 1
+          ? { matches: true, unmatchedParts: [] }
+          : { matches: false, unmatchedParts: ['木枝手脚'] };
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(review) } }],
+        }));
+        return;
+      }
       calls.chat.push(payload);
       if (payload.messages.at(-1).content === '试试额度错误') {
         res.writeHead(402, { 'Content-Type': 'application/json' }).end('{}');
@@ -269,7 +279,7 @@ test('StepFun SSE、照片方案接 GPT 生图、会话隔离和任务幂等', {
     }
     if (req.url === '/v1/images/edits') {
       calls.image.push({ body, auth: req.headers.authorization, type: req.headers['content-type'] });
-      if (calls.image.length > 1) {
+      if (calls.image.length > 2) {
         res.writeHead(500).end();
         return;
       }
@@ -362,17 +372,22 @@ test('StepFun SSE、照片方案接 GPT 生图、会话隔离和任务幂等', {
   assert.equal(calls.image.length, 1);
   assert.equal(calls.image[0].auth, 'Bearer fixture');
   assert.match(calls.image[0].type, /multipart\/form-data/);
-  assert.match(calls.image[0].body.toString(), /name="image\[\]"; filename="reference.jpeg"/);
-  assert.ok(calls.image[0].body.includes(photo));
+  assert.ok(!calls.image[0].body.includes(photo));
   assert.ok(calls.image[0].body.includes(brief.photoStyle));
   assert.ok(calls.image[0].body.includes(brief.dollDesign));
   assert.ok(calls.image[0].body.includes('gpt-image-2.6-flare'));
-  assert.ok(calls.image[0].body.includes('Input image 2: 带帽橡果'));
-  assert.ok(calls.image[0].body.includes('Input image 3: 云朵棉面料'));
+  assert.ok(calls.image[0].body.includes('Input image 1: 带帽橡果'));
+  assert.ok(calls.image[0].body.includes('Input image 2: 云朵棉面料'));
   assert.ok(calls.image[0].body.includes('The material list below is exhaustive'));
   assert.ok(calls.image[0].body.includes(acornArtwork));
   assert.ok(calls.image[0].body.includes(cottonArtwork));
-  assert.equal(calls.image[0].body.toString().match(/name="image\[\]"/g).length, 3);
+  assert.equal(calls.image[0].body.toString().match(/name="image\[\]"/g).length, 2);
+  assert.equal(calls.review.length, 1);
+  assert.equal(calls.review[0].model, 'step-5-preview');
+  const [checklist, candidate] = calls.review[0].messages[1].content;
+  assert.match(checklist.text, /带帽橡果.*头部/);
+  assert.match(checklist.text, /云朵棉面料.*围巾或衣片/);
+  assert.equal(candidate.image_url.url, 'data:image/jpeg;base64,' + output.toString('base64'));
   assert.equal((await fetch(base + version.resultUrl)).status, 404);
   assert.equal((await owner(version.resultUrl)).status, 200);
 
@@ -385,13 +400,20 @@ test('StepFun SSE、照片方案接 GPT 生图、会话隔离和任务幂等', {
   assert.equal(finished.physicalExecuted, false);
 
   const redrawUrl = '/api/cards/' + first.cardId + '/redraw';
+  const mismatch = await json(await post(redrawUrl, {}, 'gpt-material-mismatch'), 202);
+  const rejected = await waitFor('/api/card-versions/' + mismatch.versionId);
+  assert.equal(rejected.status, 'failed');
+  assert.equal(rejected.errorCode, 'MATERIAL_MISMATCH');
+  assert.equal(rejected.resultUrl, null);
+  await assert.rejects(readFile(path.join(dir, 'files', 'generated', `${mismatch.versionId}.jpg`)), { code: 'ENOENT' });
+  assert.equal(calls.review.length, 2);
   const redraw = await json(await post(redrawUrl, {}, 'gpt-unknown'), 202);
   const unknown = await waitFor('/api/card-versions/' + redraw.versionId);
   assert.equal(unknown.errorCode, 'GENERATION_STATUS_UNKNOWN');
   const blocked = await post(redrawUrl, {}, 'gpt-second-redraw');
   assert.equal(blocked.status, 409);
   assert.equal((await blocked.json()).error.code, 'GENERATION_REVIEW_REQUIRED');
-  assert.equal(calls.image.length, 2);
+  assert.equal(calls.image.length, 3);
   assert.ok(calls.image[1].body.includes(brief.dollDesign));
   assert.ok(calls.image[1].body.includes(acornArtwork));
 });

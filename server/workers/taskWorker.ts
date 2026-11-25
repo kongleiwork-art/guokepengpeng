@@ -1,10 +1,11 @@
 import crypto from 'node:crypto';
-import { config } from '../config.ts';
+import { config, isPhotoMbtiEnabled } from '../config.ts';
 import { db, getMaterialsByIds, getRuntimeSettings, recordRunLog, type MaterialRecord, type RuntimeSettings } from '../db.ts';
-import { getImageProvider, type DollBrief } from '../providers/imageProvider.ts';
+import { getImageProvider, saveGeneratedAsset, type DollBrief } from '../providers/imageProvider.ts';
+import { materialReviewUnavailable, verifyGeneratedMaterials } from '../providers/materialReview.ts';
 import { getOutputProvider } from '../providers/outputProvider.ts';
 import { deleteMedia, readMedia } from '../mediaStore.ts';
-import { publishTask, type Task } from './taskQueue.ts';
+import { publishTask, TASK_VISIBILITY_TIMEOUT_SECONDS, type Task } from './taskQueue.ts';
 
 export type ImageSettings = Pick<RuntimeSettings, 'imageVendor' | 'imageModel' | 'imageModelTier' | 'strictMaterialConstraint'> &
   DollBrief & { materialPlan?: MaterialRecord[] };
@@ -92,7 +93,7 @@ export async function processTask(task: Task): Promise<void> {
 async function recoverInterruptedTask(kind: 'image' | 'output', id: string): Promise<void> {
   if (!config.isVercel) return;
   const table = kind === 'image' ? 'card_versions' : 'output_jobs';
-  const staleBefore = new Date(Date.now() - 150_000).toISOString();
+  const staleBefore = new Date(Date.now() - TASK_VISIBILITY_TIMEOUT_SECONDS * 1000).toISOString();
   await db.prepare(
     `UPDATE ${table} SET status = 'failed', finished_at = ?, error_code = ?, error_message = ?
      WHERE id = ? AND status = 'running' AND started_at < ?`
@@ -156,6 +157,10 @@ async function processImageVersion(versionId: string): Promise<void> {
       ? JSON.parse(row.image_settings)
       : await getRuntimeSettings();
     const selectedMaterials = runtimeSettings.materialPlan ?? await getMaterialsByIds(accessoryIds);
+    const useExactMaterialReferences = Boolean(runtimeSettings.materialPlan);
+    const canReviewMaterials = isPhotoMbtiEnabled();
+    const shouldReviewMaterials = useExactMaterialReferences && row.provider === 'cloud' && (config.isVercel || canReviewMaterials);
+    if (shouldReviewMaterials && !canReviewMaterials) throw materialReviewUnavailable();
     const provider = getImageProvider(row.provider, runtimeSettings.imageVendor);
     const shouldFail = row.simulate_fail === 1;
     controller.signal.throwIfAborted();
@@ -177,7 +182,7 @@ async function processImageVersion(versionId: string): Promise<void> {
         dollDesign: runtimeSettings.dollDesign,
         accessoryIds,
         selectedMaterials,
-        useExactMaterialReferences: Boolean(runtimeSettings.materialPlan),
+        useExactMaterialReferences,
         strictMaterialConstraint: runtimeSettings.strictMaterialConstraint,
         imageModelTier: runtimeSettings.imageModelTier,
         imageModel: runtimeSettings.imageModel,
@@ -185,8 +190,19 @@ async function processImageVersion(versionId: string): Promise<void> {
       },
       controller.signal
     );
+    clearTimeout(timeoutTimer);
+
+    let resultUrl: string;
+    if (result.resultKind === 'generated') {
+      if (shouldReviewMaterials) await verifyGeneratedMaterials(result.image, selectedMaterials);
+      const { ext, bytes, mimeType } = result.image;
+      resultUrl = await saveGeneratedAsset(versionId, ext, bytes, mimeType);
+    } else {
+      resultUrl = result.resultUrl;
+    }
 
     const finishedAt = new Date().toISOString();
+    const latencyMs = Date.now() - startedMs;
     const updated = await db
       .prepare(
         `UPDATE card_versions
@@ -203,10 +219,10 @@ async function processImageVersion(versionId: string): Promise<void> {
       .run(
         result.providerRequestId,
         result.resultKind,
-        result.resultUrl,
+        resultUrl,
         result.suggestedName ?? null,
         JSON.stringify(result.keywords ?? []),
-        result.latencyMs,
+        latencyMs,
         finishedAt,
         versionId
       );
@@ -218,7 +234,7 @@ async function processImageVersion(versionId: string): Promise<void> {
         provider: row.provider,
         resultKind: result.resultKind,
         status: 'succeeded',
-        totalMs: result.latencyMs,
+        totalMs: latencyMs,
         requestId: result.providerRequestId,
         detail: `card=${row.card_id} v${row.version_number} model=${
           row.provider === 'cloud' ? runtimeSettings.imageModel : 'mock-svg'

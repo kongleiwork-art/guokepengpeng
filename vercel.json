@@ -12,7 +12,7 @@
       "maxDuration": 60
     },
     "api/task-worker.ts": {
-      "maxDuration": 120,
+      "maxDuration": 180,
       "includeFiles": "{src/assets/images/**,public/assets/materials/**}",
       "experimentalTriggers": [
         {

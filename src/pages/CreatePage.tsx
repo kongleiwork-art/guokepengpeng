@@ -358,7 +358,7 @@ export function CreatePage() {
       </button>
       <p className="text-xs leading-relaxed text-[#6E5C50]">
         {selectedAccessories.length
-          ? '参考照片和已选材料图会一起提交。严格实材模式下，娃娃的颜色和部件以选材为准。'
+          ? '照片用于分析和准备娃娃方案。严格实材模式下，生图只参考选中的材料图，保存前会核对成品部件。'
           : '选好材料后可以生成娃娃形象。'}
       </p>
     </div>

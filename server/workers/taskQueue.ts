@@ -3,6 +3,7 @@ import { send } from '@vercel/queue';
 import { config } from '../config.ts';
 
 export const TASK_TOPIC = 'nutshell-tasks';
+export const TASK_VISIBILITY_TIMEOUT_SECONDS = 210;
 export type Task = { kind: 'image' | 'output' | 'expire-photo'; id: string };
 type Envelope = { task: Task; signature: string };
 

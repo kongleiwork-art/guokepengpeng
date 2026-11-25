@@ -41,15 +41,17 @@ export interface ImageGenerateInput extends DollBrief {
   simulateFail?: boolean;
 }
 
-export interface ImageGenerateResult {
-  resultUrl: string;
-  resultKind: 'generated' | 'mock';
+type ImageGenerateResultInfo = {
   provider: string;
   providerRequestId: string | null;
-  latencyMs: number;
   suggestedName?: string;
   keywords?: string[];
-}
+};
+
+export type ImageGenerateResult = ImageGenerateResultInfo & (
+  | { resultKind: 'generated'; image: { bytes: Buffer; ext: string; mimeType: string } }
+  | { resultKind: 'mock'; resultUrl: string }
+);
 
 export interface ImageProvider {
   readonly mode: 'mock' | 'cloud' | 'rdk';
@@ -61,11 +63,12 @@ export function buildDollImagePrompt(input: ImageGenerateInput, materialImageLab
     return [
       'Create one small, visibly hand-assembled craft doll on a clean white studio background.',
       'The material list below is exhaustive. Use every selected material and add no other visible parts, props, paint, fabrics, or accessories. Leave out a feature if there is no selected material for it.',
-      'Input image 1 is the portrait, for mood only. Copy no visible clothing or personal accessories from it. For each later image, preserve the material’s actual shape, texture, and palette. Use one of the shown variants if that reference shows several.',
+      'Each input image is an approved material from the list. Preserve its shape, texture, and palette. Use one of the shown variants if a reference shows several.',
+      'A limbless or faceless craft ornament is valid. Keep the shell body directly on the surface when no limb part is listed. Omit eyes, a mouth, limbs, footwear, straps, and hardware unless the materials and listed uses support them.',
       input.photoStyle ? `Portrait mood note for pose and expression only: ${input.photoStyle}` : '',
       `The doll’s character is ${input.personaMbti} (${input.personaName}). Express this through arrangement and pose within the allowed parts.`,
       ...input.selectedMaterials.map((material, index) =>
-        `Input image ${index + 2}: ${material.label} (${material.material}). Part: ${materialPart(material.id, material.category)}. Details: ${material.visualHint}`,
+        `Input image ${index + 1}: ${material.label} (${material.material}). Part: ${materialPart(material.id, material.category)}. Details: ${material.visualHint}`,
       ),
       input.dollDesign ? `Arrangement inspiration only, subject to the material list: ${input.dollDesign}` : '',
       'Keep the assembly feasible for hand craft. Show the whole doll and its material textures with gentle studio light. No text, graphic overlays, or watermark.',
@@ -137,7 +140,7 @@ async function loadMaterialReferenceImages(input: ImageGenerateInput, legacyLimi
   })));
 }
 
-async function saveGeneratedAsset(versionId: string, ext: string, data: Buffer, mime: string): Promise<string> {
+export async function saveGeneratedAsset(versionId: string, ext: string, data: Buffer, mime: string): Promise<string> {
   const safeExt = ext.replace(/[^a-z0-9]/gi, '').toLowerCase() || 'png';
   const filename = `${versionId}.${safeExt}`;
   await writeMedia(`generated/${filename}`, data, mime);
@@ -162,7 +165,6 @@ class GeminiImageProvider implements ImageProvider {
       );
     }
 
-    const startedAt = Date.now();
     const targetModel = input.imageModel || IMAGE_MODELS.gemini[input.imageModelTier];
     const references = await loadMaterialReferenceImages(
       input, targetModel.startsWith('gemini-2.5-flash-image') ? 2 : 6,
@@ -181,7 +183,9 @@ class GeminiImageProvider implements ImageProvider {
         contents: [{
           role: 'user',
           parts: [
-            { inlineData: { data: input.photoBuffer.toString('base64'), mimeType: input.photoMime } },
+            ...(input.useExactMaterialReferences ? [] : [
+              { inlineData: { data: input.photoBuffer.toString('base64'), mimeType: input.photoMime } },
+            ]),
             ...references.map(({ data, mime }) => ({
               inlineData: { data: data.toString('base64'), mimeType: mime },
             })),
@@ -219,11 +223,10 @@ class GeminiImageProvider implements ImageProvider {
       if (!image || image.mimeType !== inline.mimeType) continue;
 
       return {
-        resultUrl: await saveGeneratedAsset(input.versionId, image.ext, bytes, image.mimeType),
         resultKind: 'generated',
+        image: { bytes, ext: image.ext, mimeType: image.mimeType },
         provider: 'cloud',
         providerRequestId: response.sdkHttpResponse?.headers?.['x-request-id'] || response.responseId || null,
-        latencyMs: Date.now() - startedAt,
         suggestedName: `${input.personaName.slice(0, 2)}小果`,
         keywords: [input.personaMbti, ...getDisplayLabels(input).slice(0, 2)],
       };
@@ -246,7 +249,6 @@ class MockImageProvider implements ImageProvider {
   readonly mode = 'mock' as const;
 
   async generate(input: ImageGenerateInput, signal: AbortSignal): Promise<ImageGenerateResult> {
-    const startedAt = Date.now();
     const delayMs = 1500 + (input.versionNumber % 3) * 300;
 
     await new Promise<void>((resolve, reject) => {
@@ -344,7 +346,6 @@ class MockImageProvider implements ImageProvider {
       resultKind: 'mock',
       provider: 'mock',
       providerRequestId: `mock_img_${crypto.randomBytes(6).toString('hex')}`,
-      latencyMs: Date.now() - startedAt,
       suggestedName: nameSuggestions[input.personaMbti] || `${input.personaName.slice(0, 2)}小果`,
       keywords: [input.personaMbti, ...labels.slice(0, 2)],
     };
@@ -365,7 +366,6 @@ class OpenAIImageProvider implements ImageProvider {
       throw Object.assign(new Error('GPT 生图尚未配置 OPENAI_API_KEY'), { code: 'PROVIDER_NOT_CONFIGURED' });
     }
 
-    const startedAt = Date.now();
     const references = await loadMaterialReferenceImages(input);
     const form = new FormData();
     form.set('model', input.imageModel);
@@ -373,8 +373,10 @@ class OpenAIImageProvider implements ImageProvider {
     form.set('size', '1024x1536');
     form.set('quality', input.imageModelTier === 'hd' ? 'high' : 'low');
     form.set('output_format', 'webp');
-    const photo = new Blob([Uint8Array.from(input.photoBuffer)], { type: input.photoMime });
-    form.append('image[]', photo, 'reference.' + (input.photoMime.split('/')[1] || 'jpg'));
+    if (!input.useExactMaterialReferences) {
+      const photo = new Blob([Uint8Array.from(input.photoBuffer)], { type: input.photoMime });
+      form.append('image[]', photo, 'reference.' + (input.photoMime.split('/')[1] || 'jpg'));
+    }
     for (const { id, mime, data } of references) {
       form.append('image[]', new Blob([Uint8Array.from(data)], { type: mime }), id + '.webp');
     }
@@ -405,13 +407,11 @@ class OpenAIImageProvider implements ImageProvider {
     if (!image) {
       throw Object.assign(new Error('GPT 生图服务未返回可读取的图片'), { code: 'PROVIDER_ERROR' });
     }
-    const resultUrl = await saveGeneratedAsset(input.versionId, image.ext, bytes, image.mimeType);
     return {
-      resultUrl,
       resultKind: 'generated',
+      image: { bytes, ext: image.ext, mimeType: image.mimeType },
       provider: 'cloud',
       providerRequestId: response.headers.get('x-request-id'),
-      latencyMs: Date.now() - startedAt,
       suggestedName: `${input.personaName.slice(0, 2)}小果`,
       keywords: [input.personaMbti, ...getDisplayLabels(input).slice(0, 2)],
     };
