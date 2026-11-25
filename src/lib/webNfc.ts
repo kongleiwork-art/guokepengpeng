@@ -54,16 +54,18 @@ export function isIphoneBackgroundReadCompatible(url: string): boolean {
   }
 }
 
-export async function writeUrlToNfcTag(url: string): Promise<{ ok: boolean; message: string; iosCopied?: boolean }> {
+export async function writeUrlToNfcTag(url: string): Promise<{ ok: boolean; message: string; copied?: boolean }> {
+  const validTagUrl = isIphoneBackgroundReadCompatible(url) && /^https:\/\/[^/]+\/nfc\/[a-z0-9_-]{2,64}$/i.test(url);
+  if (!validTagUrl) return { ok: false, message: '请选择完整的 NFC HTTPS 短链接' };
   if (!isWebNfcSupported()) {
     if (isIosDevice()) {
       try {
         await navigator.clipboard.writeText(url);
         return {
           ok: true,
-          iosCopied: true,
+          copied: true,
           message:
-            '已为你复制链接！由于苹果 iOS 禁止网页直接写卡，请切到免费 App「NFC Tools」→ 写 → 添加记录 → URL/URI → 粘贴并点「写」，用 iPhone 顶部贴近贴纸 1 秒完成（写完后任意 iPhone 碰一碰都可直接原生弹窗打开）。',
+            '已复制链接。打开 NFC Tools，选「写」→「添加记录」→「URL/URI」，粘贴链接后将 iPhone 顶部贴近标签写入。写完后读回同一张标签核对。',
         };
       } catch {
         return {
@@ -112,7 +114,7 @@ export async function writeUrlToNfcTag(url: string): Promise<{ ok: boolean; mess
   }
 }
 
-export async function readUrlFromNfcTag(timeoutMs = 15000): Promise<{
+export async function readUrlFromNfcTag(expectedUrl: string, timeoutMs = 15000): Promise<{
   ok: boolean;
   url?: string;
   message: string;
@@ -139,14 +141,16 @@ export async function readUrlFromNfcTag(timeoutMs = 15000): Promise<{
       controller.abort();
       const records = event.message?.records ?? [];
       const decoder = new TextDecoder();
-      for (const rec of records) {
-        if (rec.recordType === 'url' && rec.data) {
-          const decoded = decoder.decode(rec.data);
-          resolve({ ok: true, url: decoded, message: `读回成功：${decoded}` });
-          return;
-        }
+      const record = records[0];
+      if (records.length !== 1 || record?.recordType !== 'url' || !record.data) {
+        resolve({ ok: false, message: '标签应只包含一条 NDEF URL 记录' });
+        return;
       }
-      resolve({ ok: false, message: '读到空白标签或非 URL 记录。' });
+      const url = decoder.decode(record.data);
+      resolve(url === expectedUrl
+        ? { ok: true, url, message: '读回的 URL 与此标签一致' }
+        : { ok: false, url, message: '读回的 URL 与此标签不一致：' + url });
+
     };
 
     ndef.onreadingerror = () => {

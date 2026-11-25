@@ -13,11 +13,10 @@ export function NfcRedirectPage() {
     let active = true;
     (async () => {
       try {
-        await api.initSession();
         const res = await api.resolveNfcAlias(alias);
         if (!active) return;
         haptic('success');
-        navigate(`/d/${encodeURIComponent(res.dollId)}?entry=nfc&alias=${encodeURIComponent(res.alias)}`, {
+        navigate(`/d/${encodeURIComponent(res.dollId)}/chat?entry=nfc&alias=${encodeURIComponent(res.alias)}`, {
           replace: true,
         });
       } catch (err) {

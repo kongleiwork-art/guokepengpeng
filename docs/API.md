@@ -115,7 +115,7 @@ data: {"code":"CHAT_TIMEOUT","message":"对话首字响应超过 10000ms 超时�
 - `POST /api/plot/jobs` (`owner`, `Idempotency-Key`) → `202` Body `{ cardVersionId, paperSize }`（`A6 | A5 | SQUARE_100`），返回 `{ jobId, cardId, cardVersionId, paperSize, status: "queued", mode: "mock", physicalExecuted: false }`。
 - `GET /api/plot/jobs?cardId=` (`owner`) → `200` 返回当前会话的出图任务列表。
 - `GET /api/plot/jobs/:id` (`owner`) → `200` 查询单个任务状态与 `mode` / `physicalExecuted`。
-- `GET /api/assets/generated/:filename?download=1` → 读取持久化生成的图像；附加 `download=1` 时下发附件下载头。
+- `GET /api/assets/generated/:filename?download=1` → 草稿仅限作品所属会话，绑定娃娃后访客可读取选定版本的头像。附加 `download=1` 时下发附件下载头。
 
 ### 8. 演示管理（受 `DEMO_ADMIN_TOKEN` 保护）
 
@@ -126,7 +126,18 @@ data: {"code":"CHAT_TIMEOUT","message":"对话首字响应超过 10000ms 超时�
 
 ## Provider 扩展契约（供后续 RDK / 机械臂接入）
 
+### Vercel 预览与 NFC
+
+- `GET /api/capabilities` 返回 `imageGenerationEnabled` 与 `photoMbtiEnabled`。
+- `GET /nfc/:alias` 返回 `302` 跳转到 `/d/:id/chat?entry=nfc&alias=...`。未绑定返回 `404`。
+- `POST /api/demo/nfc-tags/:alias/written` 接收 `{ url, scope }`。工坊核对标签读出的完整 URL 与当前环境的预期地址后登记时间。
+- 公开预览的照片定制和重生成返回 `403 CREATION_CLOSED`。未配置视觉模型时，照片人格推荐返回 `409 PHOTO_MBTI_UNAVAILABLE`。四题快测使用 JSON 请求。
+- 重生成遇到上一次云端结果未确认时返回 `409 GENERATION_REVIEW_REQUIRED`。人工核对结果与费用后可发送 `reviewedUnknown: true`。
+
+
 ### ImageProvider (`server/providers/imageProvider.ts`)
+
+默认云端服务使用 OpenAI 参考图编辑。工坊可手动切换 Nano Banana。生成后保存成品图和服务商请求编号。
 
 - **输入 (`ImageGenerateInput`)**：`cardId`, `versionId`, `versionNumber`, `photoBuffer`, `photoMime`, `userNickname`, `personaId`, `personaName`, `personaMbti`, `personaMaterialHint`, `accessoryIds`, `signal: AbortSignal`
 - **输出 (`ImageGenerateResult`)**：`resultUrl`（持久化路径）, `resultKind` (`generated | mock`), `provider`, `providerRequestId`, `latencyMs`, 可选 `suggestedName`, `keywords`
@@ -140,4 +151,4 @@ data: {"code":"CHAT_TIMEOUT","message":"对话首字响应超过 10000ms 超时�
 
 ## 主要错误码一览
 
-`INVALID_INPUT`、`UNSUPPORTED_IMAGE`、`IMAGE_TOO_LARGE`、`PHOTO_EXPIRED`、`NOT_FOUND`、`UNAUTHORIZED`、`PROVIDER_NOT_CONFIGURED`、`PROVIDER_ERROR`、`GENERATION_TIMEOUT`、`GENERATION_LIMIT_REACHED`、`TASK_ALREADY_RUNNING`、`CARD_LOCKED`、`INVALID_CARD_VERSION`、`IDEMPOTENCY_CONFLICT`、`CHAT_TIMEOUT`、`WORKER_RESTARTED`。
+`INVALID_INPUT`、`UNSUPPORTED_IMAGE`、`IMAGE_TOO_LARGE`、`PHOTO_EXPIRED`、`NOT_FOUND`、`UNAUTHORIZED`、`ADMIN_NOT_CONFIGURED`、`PROVIDER_NOT_CONFIGURED`、`PROVIDER_ERROR`、`GENERATION_TIMEOUT`、`GENERATION_LIMIT_REACHED`、`TASK_ALREADY_RUNNING`、`CARD_LOCKED`、`INVALID_CARD_VERSION`、`IDEMPOTENCY_CONFLICT`、`CHAT_TIMEOUT`、`WORKER_RESTARTED`。

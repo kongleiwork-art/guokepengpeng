@@ -9,6 +9,8 @@ import type {
   DollSummary,
   FallbackTemplate,
   ImageModelTier,
+  ImageVendor,
+  NfcWriteScope,
   MaterialCategory,
   MaterialRecord,
   MbtiGuideHistoryItem,
@@ -97,6 +99,10 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  capabilities() {
+    return requestJson<{ imageGenerationEnabled: boolean; photoMbtiEnabled: boolean }>('/api/capabilities');
+  },
+
   initSession(): Promise<SessionInfo> {
     return requestJson<SessionInfo>('/api/session', { method: 'POST' });
   },
@@ -130,6 +136,13 @@ export const api = {
   },
 
   recommendMbti(input: { photo?: File | null; quizAnswers?: MbtiQuizAnswers }): Promise<MbtiRecommendation> {
+    if (!input.photo) {
+      return requestJson('/api/mbti/recommend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ quizAnswers: input.quizAnswers }),
+      });
+    }
     const formData = new FormData();
     if (input.photo) {
       formData.append('photo', input.photo);
@@ -234,7 +247,7 @@ export const api = {
   redrawCard(
     cardId: string,
     idempotencyKey: string,
-    options?: { simulateFail?: boolean }
+    options?: { simulateFail?: boolean; reviewedUnknown?: boolean }
   ): Promise<{ cardId: string; versionId: string; versionNumber: number; status: string; provider: string }> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -246,7 +259,7 @@ export const api = {
     return requestJson(`/api/cards/${encodeURIComponent(cardId)}/redraw`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ simulateFail: Boolean(options?.simulateFail) }),
+      body: JSON.stringify({ simulateFail: Boolean(options?.simulateFail), reviewedUnknown: options?.reviewedUnknown }),
     });
   },
 
@@ -321,6 +334,7 @@ export const api = {
     patch: Partial<{
       nfcPublicBaseUrl: string;
       imageModelTier: ImageModelTier;
+      imageVendor: ImageVendor;
       chatProviderMode: ProviderMode;
       imageProviderMode: ProviderMode;
       strictMaterialConstraint: boolean;
@@ -350,10 +364,11 @@ export const api = {
     });
   },
 
-  markNfcTagWritten(adminToken: string, alias: string): Promise<{ alias: string; lastWrittenAt: string }> {
+  markNfcTagWritten(adminToken: string, alias: string, url: string, scope: NfcWriteScope): Promise<{ alias: string; lastWrittenAt: string }> {
     return requestJson(`/api/demo/nfc-tags/${encodeURIComponent(alias)}/written`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${adminToken}` },
+      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, scope }),
     });
   },
 

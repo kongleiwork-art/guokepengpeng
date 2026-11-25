@@ -1,5 +1,5 @@
-import { GoogleGenAI, Type } from '@google/genai';
-import { config, isChatCloudConfigured } from '../config.ts';
+import { isChatCloudConfigured } from '../config.ts';
+import { requestStepFunJson } from './stepfun.ts';
 import { PERSONA_SEEDS } from '../data/seed.ts';
 import type { MaterialRecord } from '../db.ts';
 
@@ -65,7 +65,7 @@ export interface MbtiGuideTurnInput {
 
 export interface MbtiGuideTurnOutput {
   status: 'questioning' | 'completed';
-  engine: 'gemini_adaptive' | 'cat_local';
+  engine: 'stepfun_adaptive' | 'cat_local';
   round: number;
   maxRounds: number;
   confidence: number;
@@ -255,7 +255,7 @@ export function computeMbtiPosterior(raw: CognitiveFunctionScores): {
 /**
  * Lightweight Chinese cognitive syntax cue analyzer for free-text responses.
  * Captures reasoning mechanics (causal structure vs empathy vs sensory detail vs divergence)
- * when running in local CAT mode or as a stabilizing prior alongside Gemini.
+ * when running in local CAT mode or as a stabilizing prior alongside StepFun.
  */
 export function extractChineseCognitiveCues(text: string): Partial<CognitiveFunctionScores> {
   const clean = text.trim();
@@ -713,11 +713,11 @@ function buildFinalReport(
 }
 
 /**
- * Gemini Cloud Adaptive Interviewer (PsyDI + Jungian 8-Function CAT architecture).
+ * StepFun Cloud Adaptive Interviewer (PsyDI + Jungian 8-Function CAT architecture).
  * Enforces strict objectivity (no sycophancy / Barnum flattery), updates 8-function deltas
  * from the user's actual reasoning syntax, and generates targeted Top-1 vs Top-2 probes.
  */
-async function runGeminiAdaptiveTurn(
+async function runStepFunAdaptiveTurn(
   input: MbtiGuideTurnInput,
   baseScores: CognitiveFunctionScores,
   round: number,
@@ -729,7 +729,6 @@ async function runGeminiAdaptiveTurn(
   nextQuestion?: MbtiGuideQuestion;
   narrative?: { evidenceSummary: string; disambiguationNote: string; keywords: string[] };
 }> {
-  const ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
   const { ranked } = computeMbtiPosterior(baseScores);
   const top3Text = ranked
     .slice(0, 3)
@@ -764,62 +763,7 @@ async function runGeminiAdaptiveTurn(
         transcript ? `历史访谈记录：\n${transcript}` : '',
       ].join('\n\n');
 
-  const weightSchema = {
-    type: Type.OBJECT,
-    properties: {
-      Ni: { type: Type.NUMBER },
-      Ne: { type: Type.NUMBER },
-      Si: { type: Type.NUMBER },
-      Se: { type: Type.NUMBER },
-      Ti: { type: Type.NUMBER },
-      Te: { type: Type.NUMBER },
-      Fi: { type: Type.NUMBER },
-      Fe: { type: Type.NUMBER },
-    },
-  };
-
-  const response = await ai.models.generateContent({
-    model: config.chatModel || 'gemini-2.5-flash',
-    contents: userPrompt,
-    config: {
-      systemInstruction,
-      temperature: 0.45,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          functionDeltas: weightSchema,
-          reaction: { type: Type.STRING },
-          nextQuestion: {
-            type: Type.OBJECT,
-            properties: {
-              phaseLabel: { type: Type.STRING },
-              targetAxes: { type: Type.STRING },
-              prompt: { type: Type.STRING },
-              options: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    id: { type: Type.STRING },
-                    label: { type: Type.STRING },
-                    weights: weightSchema,
-                  },
-                  required: ['id', 'label', 'weights'],
-                },
-              },
-            },
-          },
-          evidenceSummary: { type: Type.STRING },
-          disambiguationNote: { type: Type.STRING },
-          keywords: { type: Type.ARRAY, items: { type: Type.STRING } },
-        },
-        required: ['functionDeltas'],
-      },
-    },
-  });
-
-  const parsed = JSON.parse(response.text || '{}') as {
+  const parsed = await requestStepFunJson<{
     functionDeltas?: Partial<CognitiveFunctionScores>;
     reaction?: string;
     nextQuestion?: {
@@ -831,9 +775,15 @@ async function runGeminiAdaptiveTurn(
     evidenceSummary?: string;
     disambiguationNote?: string;
     keywords?: string[];
-  };
+  }>(
+    systemInstruction + '\n' +
+      '只返回 JSON 对象。functionDeltas 为 Ni、Ne、Si、Se、Ti、Te、Fi、Fe 数值映射。' +
+      '继续时给 reaction 和 nextQuestion，题目包含 phaseLabel、targetAxes、prompt、options。' +
+      '每个选项包含 id、label 和数值映射 weights。结束时给 evidenceSummary、disambiguationNote、keywords 数组。',
+    userPrompt,
+  );
 
-  // Clamp Gemini deltas so no single turn hijacks the psychometric posterior
+  // Clamp StepFun deltas so no single turn hijacks the psychometric posterior
   const clampedDeltas: Partial<CognitiveFunctionScores> = {};
   if (parsed.functionDeltas) {
     for (const fn of ALL_FUNCTIONS) {
@@ -903,12 +853,12 @@ export async function runMbtiGuideTurn(input: MbtiGuideTurnInput): Promise<MbtiG
   const shouldConcludeNow =
     Boolean(input.forceConclude) || completedRounds >= maxRounds || earlyConverged;
 
-  const canUseGemini = input.providerMode === 'cloud' && isChatCloudConfigured();
+  const canUseStepFun = input.providerMode === 'cloud' && isChatCloudConfigured();
 
-  // 2. Cloud Gemini Adaptive Engine (PsyDI + CAT)
-  if (canUseGemini) {
+  // 2. Cloud StepFun Adaptive Engine (PsyDI + CAT)
+  if (canUseStepFun) {
     try {
-      const aiRes = await runGeminiAdaptiveTurn(
+      const aiRes = await runStepFunAdaptiveTurn(
         input,
         scores,
         nextRound,
@@ -916,7 +866,7 @@ export async function runMbtiGuideTurn(input: MbtiGuideTurnInput): Promise<MbtiG
         shouldConcludeNow
       );
 
-      // Fuse Gemini's cognitive evidence delta with our calibrated psychometric vector
+      // Fuse StepFun's cognitive evidence delta with our calibrated psychometric vector
       const latestWasFreeText = Boolean(latest && !latest.selectedOptionId);
       scores = addWeights(scores, aiRes.functionDeltas, latestWasFreeText ? 0.95 : 0.55);
 
@@ -929,7 +879,7 @@ export async function runMbtiGuideTurn(input: MbtiGuideTurnInput): Promise<MbtiG
       if (shouldConcludeNow || !aiRes.nextQuestion) {
         return {
           status: 'completed',
-          engine: 'gemini_adaptive',
+          engine: 'stepfun_adaptive',
           round: completedRounds,
           maxRounds,
           confidence: post.confidence,
@@ -943,7 +893,7 @@ export async function runMbtiGuideTurn(input: MbtiGuideTurnInput): Promise<MbtiG
 
       return {
         status: 'questioning',
-        engine: 'gemini_adaptive',
+        engine: 'stepfun_adaptive',
         round: nextRound,
         maxRounds,
         confidence: post.confidence,
@@ -954,7 +904,7 @@ export async function runMbtiGuideTurn(input: MbtiGuideTurnInput): Promise<MbtiG
         nextQuestion: aiRes.nextQuestion,
       };
     } catch (err) {
-      console.warn('[mbtiGuideEngine] Gemini adaptive turn failed, falling back to local CAT:', err);
+      console.warn('[mbtiGuideEngine] StepFun adaptive turn failed:', (err as { code?: string }).code || 'PROVIDER_ERROR');
     }
   }
 

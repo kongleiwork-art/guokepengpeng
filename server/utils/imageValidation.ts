@@ -94,6 +94,15 @@ export function validateImageBuffer(buf: Buffer): ValidatedImage {
     });
   }
 
+  const image = inspectImageBuffer(buf);
+  if (image) return image;
+  throw Object.assign(
+    new Error('图片格式不受支持或文件内容无法解码，请上传有效的 JPEG、PNG 或 WebP 图片'),
+    { code: 'UNSUPPORTED_IMAGE', status: 400 }
+  );
+}
+
+export function inspectImageBuffer(buf: Buffer): ValidatedImage | null {
   const png = parsePngDimensions(buf);
   if (png) {
     return { mimeType: 'image/png', ext: 'png', ...png };
@@ -109,8 +118,5 @@ export function validateImageBuffer(buf: Buffer): ValidatedImage {
     return { mimeType: 'image/webp', ext: 'webp', ...webp };
   }
 
-  throw Object.assign(
-    new Error('图片格式不受支持或文件内容无法解码，请上传有效的 JPEG、PNG 或 WebP 图片'),
-    { code: 'UNSUPPORTED_IMAGE', status: 400 }
-  );
+  return null;
 }

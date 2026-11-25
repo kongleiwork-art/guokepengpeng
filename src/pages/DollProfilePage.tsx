@@ -12,7 +12,7 @@ import {
   Radio,
 } from 'lucide-react';
 import { api } from '../lib/api';
-import { isIosDevice, isIphoneBackgroundReadCompatible, isWebNfcSupported, writeUrlToNfcTag } from '../lib/webNfc';
+import { isIosDevice, isWebNfcSupported, writeUrlToNfcTag } from '../lib/webNfc';
 import type { DollDetail, MemoryItem } from '../lib/types';
 import { SafeImage } from '../components/SafeImage';
 import { WatercolorProfileSkeleton } from '../components/WatercolorLoader';
@@ -72,7 +72,7 @@ export function DollProfilePage() {
     void loadDollData();
   }, [dollId]);
 
-  const resolvedShareUrl = doll?.nfcUrl || doll?.dollUrl || `${window.location.origin}/d/${dollId}`;
+  const resolvedShareUrl = doll?.dollUrl || `${window.location.origin}/d/${dollId}`;
 
   const handleCopyUrl = async () => {
     if (!doll) return;
@@ -87,13 +87,13 @@ export function DollProfilePage() {
   };
 
   const handleWriteNfcTag = async () => {
-    if (!doll || writingNfc) return;
+    if (!doll?.nfcUrl || doll.nfcWriteScope !== 'production' || writingNfc) return;
     haptic('medium');
     setWritingNfc(true);
     if (isWebNfcSupported()) {
       setNfcNotice({ ok: true, text: '请将空白 NTAG213/215 贴纸贴近手机背面 NFC 感应区…' });
     }
-    const res = await writeUrlToNfcTag(resolvedShareUrl);
+    const res = await writeUrlToNfcTag(doll.nfcUrl);
     setWritingNfc(false);
     setNfcNotice({ ok: res.ok, text: res.message });
     haptic(res.ok ? 'success' : 'warning');
@@ -443,7 +443,7 @@ export function DollProfilePage() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button
+                {doll.nfcWriteScope === 'production' && <button
                   type="button"
                   onClick={handleWriteNfcTag}
                   disabled={writingNfc}
@@ -457,7 +457,7 @@ export function DollProfilePage() {
                       ? 'iPhone 写签助手'
                       : '写入 NFC 标签'}
                   </span>
-                </button>
+                </button>}
                 <button
                   type="button"
                   onClick={handleCopyUrl}
@@ -503,16 +503,10 @@ export function DollProfilePage() {
                   {resolvedShareUrl}
                 </div>
                 <p className="text-[11px] text-[#8E7C6E] leading-snug">
-                  {isWebNfcSupported()
-                    ? '当前支持 Android Web NFC，可直接写入 NTAG213/215；写完后 iPhone（XS 及以上）与安卓手机均可碰一碰直达唤醒。'
-                    : isIosDevice()
-                    ? 'iPhone 亮屏顶部贴近已写好标签即可原生弹窗唤醒，无需任何 App；如需用 iPhone 写签，点上方「iPhone 写签助手」复制后用免费 App「NFC Tools」写入。'
-                    : 'iPhone（XS 及以上亮屏顶部贴近）与安卓手机碰一碰标签或扫码均可直达续聊。'}
+                  iPhone XS 及后续兼容机型亮屏时，用手机顶部贴近单条 URL 的 NFC 标签。也可以扫码打开。
                 </p>
-                {!isIphoneBackgroundReadCompatible(resolvedShareUrl) && (
-                  <p className="text-[10.5px] text-[#B86A2E] leading-snug">
-                    提示：当前链接不是公网 HTTPS，请先在控制台「NFC 工坊」配置公网 HTTPS 域名后再写入贴纸，iPhone 才能碰一碰原生弹窗。
-                  </p>
+                {doll.nfcWriteScope === 'test' && (
+                  <Link to="/dev" className="text-[11px] text-[#4A8276]">预览测试贴纸可在 NFC 工坊配置</Link>
                 )}
               </div>
             </div>

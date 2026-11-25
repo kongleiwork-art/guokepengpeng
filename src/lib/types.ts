@@ -121,7 +121,7 @@ export interface MbtiGuideReport {
 
 export interface MbtiGuideTurnResponse {
   status: 'questioning' | 'completed';
-  engine: 'gemini_adaptive' | 'cat_local';
+  engine: 'stepfun_adaptive' | 'cat_local';
   round: number;
   maxRounds: number;
   confidence: number;
@@ -141,6 +141,9 @@ export interface FallbackTemplate {
   recommendedMbti: string[];
 }
 
+export type NfcWriteScope = 'production' | 'test' | 'unavailable';
+export type ImageVendor = 'openai' | 'gemini';
+
 export interface DollSummary {
   id: string;
   kind: 'demo' | 'personal';
@@ -151,6 +154,7 @@ export interface DollSummary {
   dollUrl: string;
   nfcUrl?: string;
   nfcAlias?: string | null;
+  nfcWriteScope?: NfcWriteScope;
   createdAt: string;
   persona: PersonaPublic;
 }
@@ -267,6 +271,10 @@ export interface OutputJob {
 
 export interface RuntimeSettings {
   nfcPublicBaseUrl: string;
+  nfcWriteScope: NfcWriteScope;
+  nfcBaseUrlEditable: boolean;
+  imageGenerationEnabled: boolean;
+  imageVendor: ImageVendor;
   effectiveBaseUrl: string;
   imageModelTier: ImageModelTier;
   imageModelTierLabel: string;

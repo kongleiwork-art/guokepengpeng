@@ -1,15 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { GoogleGenAI } from '@google/genai';
+import { ApiError, GoogleGenAI, Modality } from '@google/genai';
 import {
   config,
-  IMAGE_MODEL_BY_TIER,
+  IMAGE_MODELS,
   isImageCloudConfigured,
   type ImageModelTier,
+  type ImageVendor,
 } from '../config.ts';
 import { FALLBACK_TEMPLATES, getAccessoryLabels } from '../data/seed.ts';
 import type { MaterialRecord } from '../db.ts';
+import { inspectImageBuffer } from '../utils/imageValidation.ts';
+import { writeMedia } from '../mediaStore.ts';
 
 export interface ImageGenerateInput {
   cardId: string;
@@ -35,7 +38,7 @@ export interface ImageGenerateResult {
   resultUrl: string;
   resultKind: 'generated' | 'mock';
   provider: string;
-  providerRequestId: string;
+  providerRequestId: string | null;
   latencyMs: number;
   suggestedName?: string;
   keywords?: string[];
@@ -89,11 +92,10 @@ function resolveLocalAssetFile(urlPath: string): { absPath: string; mime: string
   return null;
 }
 
-function saveGeneratedAsset(versionId: string, ext: string, data: Buffer): string {
+async function saveGeneratedAsset(versionId: string, ext: string, data: Buffer, mime: string): Promise<string> {
   const safeExt = ext.replace(/[^a-z0-9]/gi, '').toLowerCase() || 'png';
   const filename = `${versionId}.${safeExt}`;
-  const outPath = path.join(config.storagePath, 'generated', filename);
-  fs.writeFileSync(outPath, data);
+  await writeMedia(`generated/${filename}`, data, mime);
   return `/api/assets/generated/${filename}`;
 }
 
@@ -104,13 +106,13 @@ function getDisplayLabels(input: ImageGenerateInput): string[] {
   return getAccessoryLabels(input.accessoryIds);
 }
 
-class CloudImageProvider implements ImageProvider {
+class GeminiImageProvider implements ImageProvider {
   readonly mode = 'cloud' as const;
 
   async generate(input: ImageGenerateInput, signal: AbortSignal): Promise<ImageGenerateResult> {
-    if (!isImageCloudConfigured()) {
+    if (!isImageCloudConfigured('gemini')) {
       throw Object.assign(
-        new Error('真实生图服务未配置密钥（请在 Settings > Secrets 配置 GEMINI_API_KEY 或 IMAGE_API_KEY）'),
+        new Error('Nano Banana 生图尚未配置 GEMINI_API_KEY'),
         { code: 'PROVIDER_NOT_CONFIGURED' }
       );
     }
@@ -118,182 +120,65 @@ class CloudImageProvider implements ImageProvider {
     const startedAt = Date.now();
     const prompt = buildDollImagePrompt(input);
 
-    if (config.imageApiBase) {
-      return this.generateViaOpenAICompatible(input, prompt, startedAt, signal);
-    }
-    return this.generateViaGemini(input, prompt, startedAt, signal);
-  }
-
-  private async generateViaGemini(
-    input: ImageGenerateInput,
-    prompt: string,
-    startedAt: number,
-    signal: AbortSignal
-  ): Promise<ImageGenerateResult> {
-    const apiKey = config.imageApiKey || config.geminiApiKey;
     const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
+      apiKey: config.geminiApiKey,
+      vertexai: false,
+      httpOptions: { baseUrl: config.geminiImageBaseUrl, apiVersion: 'v1beta', timeout: config.imageTimeoutMs, retryOptions: { attempts: 1 } },
     });
-
-    const targetModel = input.imageModel || IMAGE_MODEL_BY_TIER[input.imageModelTier] || IMAGE_MODEL_BY_TIER.fast;
-
-    const abortPromise = new Promise<never>((_, reject) => {
-      if (signal.aborted) {
-        reject(Object.assign(new Error('生图任务已超时或取消'), { code: 'GENERATION_TIMEOUT' }));
-        return;
-      }
-      signal.addEventListener(
-        'abort',
-        () => reject(Object.assign(new Error('生图任务超过超时上限'), { code: 'GENERATION_TIMEOUT' })),
-        { once: true }
-      );
-    });
-
+    const targetModel = input.imageModel || IMAGE_MODELS.gemini[input.imageModelTier];
     let response;
     try {
-      response = await Promise.race([
-        ai.models.generateContent({
-          model: targetModel,
-          contents: {
-            parts: [
-              {
-                inlineData: {
-                  data: input.photoBuffer.toString('base64'),
-                  mimeType: input.photoMime,
-                },
-              },
-              { text: prompt },
-            ],
+      response = await ai.models.generateContent({
+        model: targetModel,
+        contents: [{
+          role: 'user',
+          parts: [
+            { inlineData: { data: input.photoBuffer.toString('base64'), mimeType: input.photoMime } },
+            { text: prompt },
+          ],
+        }],
+        config: {
+          abortSignal: signal,
+          responseModalities: [Modality.TEXT, Modality.IMAGE],
+          imageConfig: {
+            aspectRatio: '3:4',
+            ...(input.imageModelTier === 'hd' ? { imageSize: '1K' } : {}),
           },
-          config: {
-            imageConfig: {
-              aspectRatio: '3:4',
-              ...(input.imageModelTier === 'hd' ? { imageSize: '1K' } : {}),
-            },
-          },
-        }),
-        abortPromise,
-      ]);
+        },
+      });
     } catch (err: unknown) {
-      const rawMsg = err instanceof Error ? err.message : String(err);
-      if (rawMsg.includes('GENERATION_TIMEOUT') || signal.aborted) {
-        throw Object.assign(new Error('Nano 图像生成超过超时上限，可重试或使用预设模板兜底'), {
-          code: 'GENERATION_TIMEOUT',
-        });
+      if (signal.aborted || !(err instanceof ApiError) || err.status >= 500) {
+        throw unknownImageStatus('Nano Banana');
       }
-      if (
-        rawMsg.includes('429') ||
-        rawMsg.includes('RESOURCE_EXHAUSTED') ||
-        rawMsg.includes('403') ||
-        rawMsg.includes('PERMISSION_DENIED') ||
-        rawMsg.includes('billing')
-      ) {
+      if (err instanceof ApiError && (err.status === 403 || err.status === 429)) {
         throw Object.assign(
-          new Error(
-            `Google Nano 模型（${targetModel}）需要已开通计费的 Gemini API Key。请在 Settings > Secrets 配置有效密钥，或先点击下方「预设模板兜底」或在 /dev 控制台切换演示模式。`
-          ),
+          new Error(`Gemini 生图请求失败（HTTP ${err.status}），请检查模型权限、配额和计费设置`),
           { code: 'PROVIDER_QUOTA_OR_BILLING' }
         );
       }
-      throw Object.assign(new Error(`Google Nano 出图调用失败：${rawMsg.slice(0, 200)}`), {
-        code: 'PROVIDER_ERROR',
-      });
+      throw Object.assign(new Error('Gemini 生图调用失败，请稍后重试'), { code: 'PROVIDER_ERROR' });
+    }
+    signal.throwIfAborted();
+
+    for (const part of response.candidates?.[0]?.content?.parts ?? []) {
+      const inline = part.inlineData;
+      if (part.thought || !inline?.data) continue;
+      const bytes = Buffer.from(inline.data, 'base64');
+      const image = inspectImageBuffer(bytes);
+      if (!image || image.mimeType !== inline.mimeType) continue;
+
+      return {
+        resultUrl: await saveGeneratedAsset(input.versionId, image.ext, bytes, image.mimeType),
+        resultKind: 'generated',
+        provider: 'cloud',
+        providerRequestId: response.sdkHttpResponse?.headers?.['x-request-id'] || response.responseId || null,
+        latencyMs: Date.now() - startedAt,
+        suggestedName: `${input.personaName.slice(0, 2)}小果`,
+        keywords: [input.personaMbti, ...getDisplayLabels(input).slice(0, 2)],
+      };
     }
 
-    const parts = response.candidates?.[0]?.content?.parts ?? [];
-    for (const part of parts) {
-      if (part.inlineData?.data) {
-        const mime = part.inlineData.mimeType ?? 'image/png';
-        const ext = mime.includes('jpeg') ? 'jpg' : mime.includes('webp') ? 'webp' : 'png';
-        const imgBuf = Buffer.from(part.inlineData.data, 'base64');
-        const resultUrl = saveGeneratedAsset(input.versionId, ext, imgBuf);
-        const labels = getDisplayLabels(input);
-        return {
-          resultUrl,
-          resultKind: 'generated',
-          provider: 'cloud',
-          providerRequestId: `nano_${input.imageModelTier}_${crypto.randomBytes(5).toString('hex')}`,
-          latencyMs: Date.now() - startedAt,
-          suggestedName: `${input.personaName.slice(0, 2)}小果`,
-          keywords: [input.personaMbti, ...labels.slice(0, 2)],
-        };
-      }
-    }
-
-    throw Object.assign(new Error(`Google Nano（${targetModel}）未返回图像数据，请稍后重试`), {
-      code: 'PROVIDER_ERROR',
-    });
-  }
-
-  private async generateViaOpenAICompatible(
-    input: ImageGenerateInput,
-    prompt: string,
-    startedAt: number,
-    signal: AbortSignal
-  ): Promise<ImageGenerateResult> {
-    const endpoint = `${config.imageApiBase.replace(/\/+$/, '')}/images/generations`;
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.imageApiKey}`,
-      },
-      body: JSON.stringify({
-        model: input.imageModel || config.imageModel,
-        prompt,
-        size: '1024x1024',
-        response_format: 'b64_json',
-      }),
-      signal,
-    });
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw Object.assign(
-        new Error(`云端生图接口返回 HTTP ${response.status}${text ? `: ${text.slice(0, 120)}` : ''}`),
-        { code: 'PROVIDER_ERROR' }
-      );
-    }
-
-    const payload = (await response.json()) as {
-      data?: Array<{ b64_json?: string; url?: string }>;
-    };
-    const item = payload.data?.[0];
-    let imgBuf: Buffer | null = null;
-    let ext = 'png';
-
-    if (item?.b64_json) {
-      imgBuf = Buffer.from(item.b64_json, 'base64');
-    } else if (item?.url) {
-      const dl = await fetch(item.url, { signal });
-      if (!dl.ok) {
-        throw Object.assign(new Error('下载供应商临时图像地址失败'), { code: 'PROVIDER_ERROR' });
-      }
-      const ct = dl.headers.get('content-type') || 'image/png';
-      ext = ct.includes('jpeg') ? 'jpg' : ct.includes('webp') ? 'webp' : 'png';
-      imgBuf = Buffer.from(await dl.arrayBuffer());
-    }
-
-    if (!imgBuf) {
-      throw Object.assign(new Error('云端生图响应缺少有效图片内容'), { code: 'PROVIDER_ERROR' });
-    }
-
-    const resultUrl = saveGeneratedAsset(input.versionId, ext, imgBuf);
-    const labels = getDisplayLabels(input);
-    return {
-      resultUrl,
-      resultKind: 'generated',
-      provider: 'cloud',
-      providerRequestId: response.headers.get('x-request-id') || `cloud_img_${crypto.randomBytes(6).toString('hex')}`,
-      latencyMs: Date.now() - startedAt,
-      suggestedName: `${input.personaName.slice(0, 2)}小果`,
-      keywords: [input.personaMbti, ...labels.slice(0, 2)],
-    };
+    throw Object.assign(new Error(`Gemini（${targetModel}）未返回可保存的成品图`), { code: 'PROVIDER_ERROR' });
   }
 }
 
@@ -382,7 +267,7 @@ class MockImageProvider implements ImageProvider {
   </text>
 </svg>`;
 
-    const resultUrl = saveGeneratedAsset(input.versionId, 'svg', Buffer.from(svg, 'utf-8'));
+    const resultUrl = await saveGeneratedAsset(input.versionId, 'svg', Buffer.from(svg, 'utf-8'), 'image/svg+xml');
 
     const nameSuggestions: Record<string, string> = {
       ENFP: '薄荷栗子',
@@ -415,9 +300,74 @@ class MockImageProvider implements ImageProvider {
   }
 }
 
-const cloudImageProvider = new CloudImageProvider();
+function unknownImageStatus(vendor: string): Error {
+  return Object.assign(new Error(`${vendor} 任务状态未能确认，请先在服务商控制台核对结果与费用`), {
+    code: 'GENERATION_STATUS_UNKNOWN',
+  });
+}
+
+class OpenAIImageProvider implements ImageProvider {
+  readonly mode = 'cloud' as const;
+
+  async generate(input: ImageGenerateInput, signal: AbortSignal): Promise<ImageGenerateResult> {
+    if (!isImageCloudConfigured('openai')) {
+      throw Object.assign(new Error('GPT 生图尚未配置 OPENAI_API_KEY'), { code: 'PROVIDER_NOT_CONFIGURED' });
+    }
+
+    const startedAt = Date.now();
+    const form = new FormData();
+    form.set('model', input.imageModel);
+    form.set('prompt', buildDollImagePrompt(input));
+    form.set('size', '1024x1536');
+    form.set('quality', input.imageModelTier === 'hd' ? 'high' : 'low');
+    form.set('output_format', 'webp');
+    const photo = new Blob([Uint8Array.from(input.photoBuffer)], { type: input.photoMime });
+    form.append('image[]', photo, 'reference.' + (input.photoMime.split('/')[1] || 'jpg'));
+
+    let response: Response;
+    try {
+      response = await fetch(config.openaiApiBase + '/images/edits', {
+        method: 'POST',
+        body: form,
+        headers: { Authorization: 'Bearer ' + config.openaiImageKey },
+        signal,
+      });
+    } catch {
+      throw unknownImageStatus('OpenAI');
+    }
+    if (response.status >= 500 || response.status === 408) throw unknownImageStatus('OpenAI');
+    if (!response.ok) {
+      const quota = [401, 402, 403, 429].includes(response.status);
+      throw Object.assign(new Error(`GPT 生图请求失败（HTTP ${response.status}）`), {
+        code: quota ? 'PROVIDER_QUOTA_OR_BILLING' : 'PROVIDER_ERROR',
+      });
+    }
+
+    const payload = await response.json().catch(() => { throw unknownImageStatus('OpenAI'); });
+    const data = payload?.data?.[0]?.b64_json;
+    const bytes = Buffer.from(typeof data === 'string' ? data : '', 'base64');
+    const image = inspectImageBuffer(bytes);
+    if (!image) {
+      throw Object.assign(new Error('GPT 生图服务未返回可读取的图片'), { code: 'PROVIDER_ERROR' });
+    }
+    const resultUrl = await saveGeneratedAsset(input.versionId, image.ext, bytes, image.mimeType);
+    return {
+      resultUrl,
+      resultKind: 'generated',
+      provider: 'cloud',
+      providerRequestId: response.headers.get('x-request-id'),
+      latencyMs: Date.now() - startedAt,
+      suggestedName: `${input.personaName.slice(0, 2)}小果`,
+      keywords: [input.personaMbti, ...getDisplayLabels(input).slice(0, 2)],
+    };
+  }
+}
+
+const geminiImageProvider = new GeminiImageProvider();
+const openAIImageProvider = new OpenAIImageProvider();
 const mockImageProvider = new MockImageProvider();
 
-export function getImageProvider(mode: 'mock' | 'cloud' = config.imageProvider): ImageProvider {
-  return mode === 'cloud' ? cloudImageProvider : mockImageProvider;
+export function getImageProvider(mode: 'mock' | 'cloud', vendor: ImageVendor): ImageProvider {
+  if (mode === 'mock') return mockImageProvider;
+  return vendor === 'gemini' ? geminiImageProvider : openAIImageProvider;
 }

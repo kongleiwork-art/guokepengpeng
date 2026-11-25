@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'motion/react';
 import {
   ArrowLeft,
@@ -17,6 +17,7 @@ import type {
   AccessoryOption,
   MaterialCategory,
   MbtiRecommendation,
+  MbtiQuizAnswers,
   PersonaPublic,
 } from '../lib/types';
 import { WatercolorPersonaGridSkeleton } from '../components/WatercolorLoader';
@@ -41,6 +42,13 @@ const CATEGORY_LABELS: Record<MaterialCategory, string> = {
   dried_botanical: '干燥花草点缀',
 };
 
+const QUIZ_QUESTIONS = [
+  { key: 'energy', text: '忙完一周，你更想怎样充电？', options: [['E', '和朋友聚一聚'], ['I', '自己安静待会儿']] },
+  { key: 'perception', text: '拿到一袋做手工的材料，你先做什么？', options: [['S', '看看每件材料的质感和尺寸'], ['N', '想象它们能变成什么']] },
+  { key: 'judgment', text: '两种设计意见不同，你通常先看什么？', options: [['T', '哪个更符合要求'], ['F', '哪个更照顾大家的感受']] },
+  { key: 'lifestyle', text: '周末做手工时，你喜欢怎样安排？', options: [['J', '先列好步骤和时间'], ['P', '边做边尝试新想法']] },
+] as const;
+
 export function CreatePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -61,13 +69,17 @@ export function CreatePage() {
   const [personas, setPersonas] = useState<PersonaPublic[]>([]);
   const [accessories, setAccessories] = useState<AccessoryOption[]>([]);
   const [loadingInit, setLoadingInit] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [creationEnabled, setCreationEnabled] = useState(false);
+  const [photoMbtiEnabled, setPhotoMbtiEnabled] = useState(false);
+  const [quizAnswers, setQuizAnswers] = useState<MbtiQuizAnswers>({});
 
   const [step, setStep] = useState<WizardStep>(1);
   const [desktopRightTab, setDesktopRightTab] = useState<'persona' | 'accessories'>('persona');
 
   const [userNickname, setUserNickname] = useState('');
   const [personaId, setPersonaId] = useState('persona_enfp');
-  const [personaMode, setPersonaMode] = useState<'ai_guide' | 'manual'>(
+  const [personaMode, setPersonaMode] = useState<'ai_guide' | 'manual' | 'quiz'>(
     presetPersonaId ? 'manual' : 'ai_guide'
   );
   const [showAllPersonas, setShowAllPersonas] = useState(false);
@@ -97,6 +109,10 @@ export function CreatePage() {
     let active = true;
     (async () => {
       try {
+        const capabilities = await api.capabilities();
+        if (!active) return;
+        setCreationEnabled(capabilities.imageGenerationEnabled);
+        setPhotoMbtiEnabled(capabilities.photoMbtiEnabled);
         await api.initSession();
         const [pList, aList] = await Promise.all([api.listPersonas(), api.listAccessories()]);
         if (!active) return;
@@ -120,6 +136,8 @@ export function CreatePage() {
             setSelectedAccessories(aList.slice(0, 2).map((a) => a.id));
           }
         }
+      } catch (error) {
+        if (active) setLoadError(error instanceof Error ? error.message : '定制页面暂时不可用');
       } finally {
         if (active) setLoadingInit(false);
       }
@@ -234,10 +252,10 @@ export function CreatePage() {
     idemKeyRef.current = generateIdempotencyKey('card');
   };
 
-  const handleRunPhotoRecommend = async () => {
+  const handleRecommend = async (source: 'photo' | 'quiz') => {
     if (recommending) return;
     setRecommendError(null);
-    if (!photoFile) {
+    if (source === 'photo' && (!photoMbtiEnabled || !photoFile)) {
       setRecommendError('请先在第 1 步上传或拍摄一张自拍，再使用 AI 气质分析。');
       return;
     }
@@ -245,9 +263,7 @@ export function CreatePage() {
     haptic('medium');
     setRecommending(true);
     try {
-      const res = await api.recommendMbti({
-        photo: photoFile,
-      });
+      const res = await api.recommendMbti(source === 'photo' ? { photo: photoFile } : { quizAnswers });
       setRecommendation(res);
       applyPersonaSelection(res.primaryPersonaId, res.suggestedMaterialIds);
       haptic('success');
@@ -279,7 +295,7 @@ export function CreatePage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (submitting) return;
+    if (submitting || !creationEnabled) return;
     setSubmitError(null);
 
     if (!photoFile) {
@@ -527,7 +543,7 @@ export function CreatePage() {
         <div className="flex items-baseline gap-2">
           <span className="font-atelier-num italic text-[14px] text-[#4A8276]">02.</span>
           <h2 className="font-editorial text-base font-semibold text-[#382A22]">
-            角色人格（AI 荣格八维引导 / 16 型直选）
+            果壳娃娃人格
           </h2>
         </div>
 
@@ -546,6 +562,10 @@ export function CreatePage() {
             }`}
           >
             AI 引导测评
+          </button>
+          <button type="button" onClick={() => { setRecommendError(null); setPersonaMode('quiz'); }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium ${personaMode === 'quiz' ? 'bg-white text-[#382A22]' : 'text-[#7D6C5F]'}`}>
+            4 题快测
           </button>
           <button
             type="button"
@@ -569,6 +589,32 @@ export function CreatePage() {
         <MbtiAiGuidePanel onApplyPersona={applyPersonaSelection} />
       </div>
 
+      {personaMode === 'quiz' && (
+        <section className="space-y-3">
+          {QUIZ_QUESTIONS.map(({ key, text, options }) => (
+            <fieldset key={key} className="rounded-xl border border-[#E6DDD0] bg-[#FFFDF9] px-3 py-2">
+              <legend className="px-1 text-xs font-medium text-[#382A22]">{text}</legend>
+              <div className="flex flex-wrap gap-2">
+                {options.map(([value, label]) => (
+                  <label key={value} className="flex items-center gap-1.5 px-1 py-1 text-xs text-[#6E5C50]">
+                    <input type="radio" name={`personality-${key}`} value={value} checked={quizAnswers[key] === value}
+                      onChange={() => setQuizAnswers((current) => ({ ...current, [key]: value }))} />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          ))}
+          <button type="button" className="btn-ink-tinted px-4 py-2 text-xs"
+            disabled={recommending || Object.keys(quizAnswers).length !== QUIZ_QUESTIONS.length}
+            onClick={() => void handleRecommend('quiz')}>
+            {recommending ? '分析中…' : '查看推荐人格'}
+          </button>
+          {recommendError && <p role="alert" className="text-xs text-[#9E3D2E]">{recommendError}</p>}
+          {recommendation && <p className="text-sm text-[#382A22]"><strong>{recommendation.primaryMbti}</strong> {recommendation.reason}</p>}
+        </section>
+      )}
+
       {/* Mode B: Direct 16-MBTI Picker + Optional Selfie Analysis */}
       {personaMode === 'manual' && (
         <div className="space-y-3.5">
@@ -576,18 +622,18 @@ export function CreatePage() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 text-xs font-medium text-[#382A22]">
                 <Wand2 className="w-3.5 h-3.5 text-[#4A8276]" />
-                <span>已知 MBTI 可直接点选，或参考自拍气质</span>
+                <span>{photoMbtiEnabled ? '选择 MBTI 或参考照片' : '选择 MBTI，或使用 4 题快测'}</span>
               </div>
               <div className="flex items-center gap-2">
-                <button
+                {photoMbtiEnabled && <button
                   type="button"
                   disabled={recommending || !photoFile}
-                  onClick={() => void handleRunPhotoRecommend()}
+                  onClick={() => void handleRecommend('photo')}
                   className="inline-flex items-center gap-1 px-2.5 py-1 text-[11.5px] font-medium btn-ink-tinted disabled:opacity-45 whitespace-nowrap"
                 >
                   <Sparkles className="w-3 h-3 text-[#4A8276]" />
                   <span>{recommending ? '分析中…' : 'AI 看自拍参考'}</span>
-                </button>
+                </button>}
                 <button
                   type="button"
                   onClick={() => {
@@ -804,6 +850,27 @@ export function CreatePage() {
       </div>
     </div>
   );
+
+  if (loadingInit) {
+    return <div role="status" className="mx-auto max-w-2xl p-6 text-sm text-[#6E5C50]">正在加载工坊…</div>;
+  }
+
+  if (!creationEnabled || loadError) {
+    return (
+      <div className="mx-auto max-w-2xl space-y-4 px-4 py-6">
+        <section className="studio-card space-y-2 rounded-[20px] p-5">
+          <h1 className="font-editorial text-xl font-semibold text-[#382A22]">
+            {creationEnabled ? '定制工坊暂时不可用' : '照片定制 · 待开放'}
+          </h1>
+          {loadError
+            ? <p role="alert" className="text-sm text-[#6E5C50]">{loadError}</p>
+            : <p className="text-sm text-[#6E5C50]">可以先测果壳娃娃人格，或去展馆和演示娃娃聊天。</p>}
+          <Link to="/plaza" className="inline-block text-sm font-medium text-[#3D7267]">逛果壳展馆</Link>
+        </section>
+        {!loadError && <section className="studio-card rounded-[20px] p-5">{renderPersonaStep()}</section>}
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-[1160px] mx-auto px-3.5 sm:px-8 py-3 sm:py-6 space-y-3.5 sm:space-y-5">

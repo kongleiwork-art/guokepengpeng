@@ -1,16 +1,17 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { pipeline } from 'node:stream/promises';
 import express from 'express';
 import multer from 'multer';
 import QRCode from 'qrcode';
 import {
   buildPublicBaseUrl,
   config,
-  IMAGE_MODEL_BY_TIER,
+  IMAGE_MODELS,
   IMAGE_TIER_LABELS,
   isChatCloudConfigured,
   isImageCloudConfigured,
+  nfcWriteScope,
   validatePublicBaseUrl,
   type ImageModelTier,
   type ProviderMode,
@@ -48,11 +49,13 @@ import {
   type MbtiGuideHistoryItem,
 } from '../providers/mbtiGuideEngine.ts';
 import { validateImageBuffer } from '../utils/imageValidation.ts';
+import { deleteMedia, mediaExists, openMedia, writeMedia, type MediaKey } from '../mediaStore.ts';
+import { findNfcTarget } from '../nfc.ts';
 import {
   enqueueImageVersion,
   enqueueOutputJob,
-  markJobSimulateFail,
-  markVersionSimulateFail,
+  schedulePhotoCleanup,
+  snapshotImageSettings,
 } from '../workers/taskWorker.ts';
 
 const router = express.Router();
@@ -60,11 +63,21 @@ const router = express.Router();
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 5 * 1024 * 1024, // Accept up to 5MB in multer so our validator returns clean IMAGE_TOO_LARGE (>2MB)
+    fileSize: 2 * 1024 * 1024,
+    files: 1,
+    fields: 10,
   },
 });
 
-const inFlightChats = new Set<string>();
+const uploadPhoto: express.RequestHandler = (req, res, next) => {
+  upload.single('photo')(req, res, (error) => {
+    if (!error) return next();
+    const tooLarge = error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE';
+    sendError(req, res, tooLarge ? 413 : 400, tooLarge ? 'IMAGE_TOO_LARGE' : 'INVALID_INPUT',
+      tooLarge ? '图片体积超过限制（最大 2 MB）' : '照片上传格式无效');
+  });
+};
+
 const VALID_MATERIAL_CATEGORIES = new Set<MaterialCategory>([
   'nut_body',
   'yarn_hair',
@@ -77,28 +90,28 @@ function hashObject(obj: unknown): string {
   return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex');
 }
 
-function getLiveBaseUrl(req: express.Request): string {
-  const settings = getRuntimeSettings();
+async function getLiveBaseUrl(req: express.Request): Promise<string> {
+  const settings = await getRuntimeSettings();
   return buildPublicBaseUrl(req, settings.nfcPublicBaseUrl);
 }
 
-function resolveMaterialLabels(ids: string[]): string[] {
-  const mats = getMaterialsByIds(ids);
+async function resolveMaterialLabels(ids: string[]): Promise<string[]> {
+  const mats = await getMaterialsByIds(ids);
   if (mats.length > 0) return mats.map((m) => m.label);
   return [];
 }
 
-function checkIdempotency(
+async function checkIdempotency<T = unknown>(
   sessionId: string,
   operation: string,
   key: string | undefined,
   requestHash: string
 ):
-  | { hit: false }
+  Promise<| { hit: false }
   | { hit: true; conflict: true }
-  | { hit: true; conflict: false; status: number; body: unknown } {
+  | { hit: true; conflict: false; status: number; body: T }> {
   if (!key || !key.trim()) return { hit: false };
-  const row = db
+  const row = await db
     .prepare(
       `SELECT request_hash, response_status, response_body
        FROM idempotency_keys
@@ -120,16 +133,16 @@ function checkIdempotency(
   };
 }
 
-function saveIdempotency(
+async function saveIdempotency(
   sessionId: string,
   operation: string,
   key: string | undefined,
   requestHash: string,
   status: number,
   body: unknown
-): void {
+): Promise<void> {
   if (!key || !key.trim()) return;
-  db.prepare(
+  await db.prepare(
     `INSERT OR IGNORE INTO idempotency_keys (session_id, operation, idempotency_key, request_hash, response_status, response_body, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   ).run(
@@ -141,6 +154,35 @@ function saveIdempotency(
     JSON.stringify(body),
     new Date().toISOString()
   );
+}
+
+async function persistTask<T>(
+  sessionId: string,
+  operation: string,
+  key: string | undefined,
+  requestHash: string,
+  create: () => Promise<T>,
+): Promise<T> {
+  return db.transaction(async () => {
+    const cached = await checkIdempotency<T>(sessionId, operation, key, requestHash);
+    if (cached.hit) {
+      if (cached.conflict) {
+        throw Object.assign(new Error('相同幂等键提交了不同的任务参数'), { status: 409, code: 'IDEMPOTENCY_CONFLICT' });
+      }
+      return cached.body;
+    }
+    const body = await create();
+    await saveIdempotency(sessionId, operation, key, requestHash, 202, body);
+    return body;
+  })();
+}
+
+async function recoverQueuedDelivery(kind: 'image' | 'output', row: Record<string, unknown>) {
+  if (!config.isVercel || row.status !== 'queued' || row.dispatched_at) return;
+  const enqueue = kind === 'image' ? enqueueImageVersion : enqueueOutputJob;
+  await enqueue(String(row.id)).catch(() => {
+    // The next poll or the original idempotent retry can dispatch it again.
+  });
 }
 
 function extractIdempotencyKey(req: express.Request): string | undefined {
@@ -195,11 +237,11 @@ router.get('/health', (_req, res) => {
   });
 });
 
-router.post('/session', (req, res) => {
+router.post('/session', async (req, res) => {
   const visitorKey = extractVisitorKey(req);
-  let session = loadExistingSession(req);
+  let session = await loadExistingSession(req);
   if (!session) {
-    session = createNewSession(visitorKey);
+    session = await createNewSession(visitorKey);
   }
   setSessionCookie(req, res, session);
   sendSuccess(res, {
@@ -219,22 +261,22 @@ function generateClaimCode(): string {
   return out;
 }
 
-router.post('/session/claim-code', ensureSession, (req, res) => {
+router.post('/session/claim-code', ensureSession, async (req, res) => {
   const sessionId = req.session!.id;
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 24 * 3600 * 1000).toISOString();
 
   // Clean up expired codes opportunistically
-  db.prepare(`DELETE FROM session_claim_codes WHERE expires_at < ?`).run(now.toISOString());
+  await db.prepare(`DELETE FROM session_claim_codes WHERE expires_at < ?`).run(now.toISOString());
 
   let code = generateClaimCode();
   for (let attempt = 0; attempt < 5; attempt++) {
-    const exists = db.prepare(`SELECT code FROM session_claim_codes WHERE code = ?`).get(code);
+    const exists = await db.prepare(`SELECT code FROM session_claim_codes WHERE code = ?`).get(code);
     if (!exists) break;
     code = generateClaimCode();
   }
 
-  db.prepare(
+  await db.prepare(
     `INSERT INTO session_claim_codes (code, session_id, expires_at, created_at)
      VALUES (?, ?, ?, ?)`
   ).run(code, sessionId, expiresAt, now.toISOString());
@@ -246,14 +288,14 @@ router.post('/session/claim-code', ensureSession, (req, res) => {
   });
 });
 
-router.post('/session/claim', (req, res) => {
+router.post('/session/claim', async (req, res) => {
   const rawCode = typeof req.body?.code === 'string' ? req.body.code.trim().toUpperCase() : '';
   if (!/^[A-Z0-9]{6}$/.test(rawCode)) {
     sendError(req, res, 400, 'INVALID_INPUT', '请输入有效的 6 位记忆口令');
     return;
   }
 
-  const row = db
+  const row = await db
     .prepare(`SELECT code, session_id, expires_at FROM session_claim_codes WHERE code = ?`)
     .get(rawCode) as { code: string; session_id: string; expires_at: string } | undefined;
 
@@ -262,7 +304,7 @@ router.post('/session/claim', (req, res) => {
     return;
   }
 
-  const targetSession = loadSessionById(row.session_id);
+  const targetSession = await loadSessionById(row.session_id);
   if (!targetSession) {
     sendError(req, res, 404, 'NOT_FOUND', '对应记忆档案已失效');
     return;
@@ -270,7 +312,7 @@ router.post('/session/claim', (req, res) => {
 
   const visitorKey = extractVisitorKey(req);
   if (visitorKey) {
-    db.prepare(`UPDATE sessions SET visitor_key = ? WHERE id = ?`).run(visitorKey, targetSession.id);
+    await db.prepare(`UPDATE sessions SET visitor_key = ? WHERE id = ?`).run(visitorKey, targetSession.id);
     targetSession.visitorKey = visitorKey;
   }
   setSessionCookie(req, res, targetSession);
@@ -285,8 +327,8 @@ router.post('/session/claim', (req, res) => {
 // ============================================================
 // 2. Personas, Materials, Templates & MBTI Analyzer
 // ============================================================
-router.get('/personas', ensureSession, (_req, res) => {
-  const rows = db
+router.get('/personas', ensureSession, async (_req, res) => {
+  const rows = await db
     .prepare(
       `SELECT id, name, mbti, mbti_group, cognitive_axis, tagline, material_hint,
               speech_style, visual_trait, recommended_materials, opening_line, featured
@@ -316,8 +358,8 @@ router.get('/personas', ensureSession, (_req, res) => {
   );
 });
 
-router.get('/accessories', ensureSession, (_req, res) => {
-  const inStockMaterials = listMaterials(true);
+router.get('/accessories', ensureSession, async (_req, res) => {
+  const inStockMaterials = await listMaterials(true);
   sendSuccess(
     res,
     inStockMaterials.map((m) => ({
@@ -332,8 +374,8 @@ router.get('/accessories', ensureSession, (_req, res) => {
   );
 });
 
-router.get('/materials', ensureSession, (_req, res) => {
-  const inStockMaterials = listMaterials(true);
+router.get('/materials', ensureSession, async (_req, res) => {
+  const inStockMaterials = await listMaterials(true);
   sendSuccess(res, {
     categories: MATERIAL_CATEGORY_LABELS,
     items: inStockMaterials,
@@ -344,81 +386,67 @@ router.get('/templates', ensureSession, (_req, res) => {
   sendSuccess(res, FALLBACK_TEMPLATES);
 });
 
-router.post('/mbti/recommend', ensureSession, (req, res) => {
-  upload.single('photo')(req, res, async (multerErr) => {
-    if (multerErr) {
-      const isSizeErr = multerErr instanceof multer.MulterError && multerErr.code === 'LIMIT_FILE_SIZE';
-      sendError(
-        req,
-        res,
-        isSizeErr ? 413 : 400,
-        isSizeErr ? 'IMAGE_TOO_LARGE' : 'INVALID_INPUT',
-        isSizeErr ? '图片体积超过限制（最大 2 MB）' : multerErr.message
-      );
-      return;
-    }
-
-    let photoBuffer: Buffer | undefined;
-    let photoMime: string | undefined;
-    if (req.file?.buffer) {
-      try {
-        const validated = validateImageBuffer(req.file.buffer);
-        photoBuffer = req.file.buffer;
-        photoMime = validated.mimeType;
-      } catch (err: unknown) {
-        const e = err as { status?: number; code?: string; message?: string };
-        sendError(req, res, e.status || 400, e.code || 'UNSUPPORTED_IMAGE', e.message || '图片校验失败');
-        return;
-      }
-    }
-
-    let quizAnswers: MbtiQuizAnswers | undefined;
-    if (typeof req.body?.quizAnswers === 'string' && req.body.quizAnswers.trim()) {
-      try {
-        const parsed = JSON.parse(req.body.quizAnswers);
-        if (parsed && typeof parsed === 'object') {
-          quizAnswers = {
-            energy: parsed.energy === 'E' || parsed.energy === 'I' ? parsed.energy : undefined,
-            perception: parsed.perception === 'S' || parsed.perception === 'N' ? parsed.perception : undefined,
-            judgment: parsed.judgment === 'T' || parsed.judgment === 'F' ? parsed.judgment : undefined,
-            lifestyle: parsed.lifestyle === 'J' || parsed.lifestyle === 'P' ? parsed.lifestyle : undefined,
-          };
-        }
-      } catch {
-        // Ignore malformed optional quiz payload
-      }
-    } else if (req.body?.quizAnswers && typeof req.body.quizAnswers === 'object') {
-      const parsed = req.body.quizAnswers;
-      quizAnswers = {
-        energy: parsed.energy === 'E' || parsed.energy === 'I' ? parsed.energy : undefined,
-        perception: parsed.perception === 'S' || parsed.perception === 'N' ? parsed.perception : undefined,
-        judgment: parsed.judgment === 'T' || parsed.judgment === 'F' ? parsed.judgment : undefined,
-        lifestyle: parsed.lifestyle === 'J' || parsed.lifestyle === 'P' ? parsed.lifestyle : undefined,
-      };
-    }
-
+router.post('/mbti/recommend', ensureSession, uploadPhoto, async (req, res) => {
+  let photoBuffer: Buffer | undefined;
+  let photoMime: string | undefined;
+  if (req.file?.buffer) {
     try {
-      const settings = getRuntimeSettings();
-      const inStockMaterials = listMaterials(true);
-      const result = await recommendMbti({
-        photoBuffer,
-        photoMime,
-        quizAnswers,
-        providerMode: settings.chatProviderMode,
-        inStockMaterials,
-      });
-      sendSuccess(res, result);
+      const validated = validateImageBuffer(req.file.buffer);
+      photoBuffer = req.file.buffer;
+      photoMime = validated.mimeType;
     } catch (err: unknown) {
       const e = err as { status?: number; code?: string; message?: string };
-      sendError(
-        req,
-        res,
-        e.status || 502,
-        e.code || 'PROVIDER_ERROR',
-        e.message || 'MBTI 人格推荐分析失败，请稍后重试'
-      );
+      sendError(req, res, e.status || 400, e.code || 'UNSUPPORTED_IMAGE', e.message || '图片校验失败');
+      return;
     }
-  });
+  }
+
+  let quizAnswers: MbtiQuizAnswers | undefined;
+  if (typeof req.body?.quizAnswers === 'string' && req.body.quizAnswers.trim()) {
+    try {
+      const parsed = JSON.parse(req.body.quizAnswers);
+      if (parsed && typeof parsed === 'object') {
+        quizAnswers = {
+          energy: parsed.energy === 'E' || parsed.energy === 'I' ? parsed.energy : undefined,
+          perception: parsed.perception === 'S' || parsed.perception === 'N' ? parsed.perception : undefined,
+          judgment: parsed.judgment === 'T' || parsed.judgment === 'F' ? parsed.judgment : undefined,
+          lifestyle: parsed.lifestyle === 'J' || parsed.lifestyle === 'P' ? parsed.lifestyle : undefined,
+        };
+      }
+    } catch {
+      // Ignore malformed optional quiz payload
+    }
+  } else if (req.body?.quizAnswers && typeof req.body.quizAnswers === 'object') {
+    const parsed = req.body.quizAnswers;
+    quizAnswers = {
+      energy: parsed.energy === 'E' || parsed.energy === 'I' ? parsed.energy : undefined,
+      perception: parsed.perception === 'S' || parsed.perception === 'N' ? parsed.perception : undefined,
+      judgment: parsed.judgment === 'T' || parsed.judgment === 'F' ? parsed.judgment : undefined,
+      lifestyle: parsed.lifestyle === 'J' || parsed.lifestyle === 'P' ? parsed.lifestyle : undefined,
+    };
+  }
+
+  try {
+    const settings = await getRuntimeSettings();
+    const inStockMaterials = await listMaterials(true);
+    const result = await recommendMbti({
+      photoBuffer,
+      photoMime,
+      quizAnswers,
+      providerMode: settings.chatProviderMode,
+      inStockMaterials,
+    });
+    sendSuccess(res, result);
+  } catch (err: unknown) {
+    const e = err as { status?: number; code?: string; message?: string };
+    sendError(
+      req,
+      res,
+      e.status || 502,
+      e.code || 'PROVIDER_ERROR',
+      e.message || 'MBTI 人格推荐分析失败，请稍后重试'
+    );
+  }
 });
 
 router.post('/mbti/guide/turn', ensureSession, async (req, res) => {
@@ -449,8 +477,8 @@ router.post('/mbti/guide/turn', ensureSession, async (req, res) => {
         : 5;
     const forceConclude = Boolean(req.body?.forceConclude);
 
-    const settings = getRuntimeSettings();
-    const inStockMaterials = listMaterials(true);
+    const settings = await getRuntimeSettings();
+    const inStockMaterials = await listMaterials(true);
     const result = await runMbtiGuideTurn({
       history,
       rawScores,
@@ -475,51 +503,20 @@ router.post('/mbti/guide/turn', ensureSession, async (req, res) => {
 // ============================================================
 // 3. NFC Tag Short Alias Resolution
 // ============================================================
-router.get('/nfc/resolve/:alias', (req, res) => {
-  const rawAlias = (req.params.alias || '').trim();
-  if (!rawAlias || rawAlias.length > 64) {
-    sendError(req, res, 400, 'INVALID_INPUT', '无效的 NFC 标签编号');
-    return;
-  }
-
-  const tag = db
-    .prepare(`SELECT alias, doll_id, label FROM nfc_tags WHERE LOWER(alias) = LOWER(?)`)
-    .get(rawAlias) as { alias: string; doll_id: string; label: string } | undefined;
-
-  if (tag) {
-    sendSuccess(res, {
-      alias: tag.alias,
-      dollId: tag.doll_id,
-      label: tag.label,
-    });
-    return;
-  }
-
-  // Fallback: allow direct dollId in /nfc/:dollId
-  const directDoll = db
-    .prepare(`SELECT id, name FROM dolls WHERE id = ?`)
-    .get(rawAlias) as { id: string; name: string } | undefined;
-
-  if (directDoll) {
-    sendSuccess(res, {
-      alias: directDoll.id,
-      dollId: directDoll.id,
-      label: directDoll.name,
-    });
-    return;
-  }
-
-  sendError(req, res, 404, 'NOT_FOUND', '未找到对应的 NFC 果壳标签映射');
+router.get('/nfc/resolve/:alias', async (req, res) => {
+  const tag = await findNfcTarget(req.params.alias);
+  if (tag) sendSuccess(res, tag);
+  else sendError(req, res, 404, 'NOT_FOUND', '未找到对应的 NFC 果壳标签映射');
 });
 
 // ============================================================
 // 4. Dolls (Demo + Session Personal)
 // ============================================================
-router.get('/dolls', ensureSession, (req, res) => {
+router.get('/dolls', ensureSession, async (req, res) => {
   const sessionId = req.session!.id;
-  const baseUrl = getLiveBaseUrl(req);
+  const baseUrl = await getLiveBaseUrl(req);
 
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT d.id, d.kind, d.name, d.avatar_url, d.card_id, d.card_version_id, d.created_at,
               p.id AS persona_id, p.name AS persona_name, p.mbti AS persona_mbti,
@@ -544,7 +541,7 @@ router.get('/dolls', ensureSession, (req, res) => {
       cardId: r.card_id ?? null,
       cardVersionId: r.card_version_id ?? null,
       dollUrl: `${baseUrl}/d/${r.id}`,
-      nfcUrl: r.nfc_alias ? `${baseUrl}/nfc/${r.nfc_alias}` : `${baseUrl}/d/${r.id}?entry=nfc`,
+      nfcUrl: r.nfc_alias ? `${baseUrl}/nfc/${r.nfc_alias}` : `${baseUrl}/nfc/${r.id}`,
       nfcAlias: r.nfc_alias ?? null,
       createdAt: r.created_at,
       persona: {
@@ -563,9 +560,10 @@ router.get('/dolls', ensureSession, (req, res) => {
 
 router.get('/dolls/:id', ensureSession, async (req, res) => {
   const dollId = req.params.id;
-  const baseUrl = getLiveBaseUrl(req);
+  const settings = await getRuntimeSettings();
+  const baseUrl = buildPublicBaseUrl(req, settings.nfcPublicBaseUrl);
 
-  const row = db
+  const row = await db
     .prepare(
       `SELECT d.id, d.kind, d.owner_session_id, d.name, d.avatar_url, d.card_id, d.card_version_id, d.created_at,
               p.id AS persona_id, p.name AS persona_name, p.mbti AS persona_mbti,
@@ -586,7 +584,7 @@ router.get('/dolls/:id', ensureSession, async (req, res) => {
   }
 
   const dollUrl = `${baseUrl}/d/${row.id}`;
-  const nfcUrl = row.nfc_alias ? `${baseUrl}/nfc/${row.nfc_alias}` : `${baseUrl}/d/${row.id}?entry=nfc`;
+  const nfcUrl = `${baseUrl}/nfc/${encodeURIComponent(String(row.nfc_alias || row.id))}`;
   const isOwner = row.kind === 'personal' && row.owner_session_id === req.session!.id;
   const qrSvg = await generateQrSvg(nfcUrl);
 
@@ -598,6 +596,7 @@ router.get('/dolls/:id', ensureSession, async (req, res) => {
     dollUrl,
     nfcUrl,
     nfcAlias: row.nfc_alias ?? null,
+    nfcWriteScope: nfcWriteScope(settings.nfcPublicBaseUrl),
     qrData: nfcUrl,
     qrSvg,
     isOwner,
@@ -618,7 +617,7 @@ router.get('/dolls/:id', ensureSession, async (req, res) => {
   });
 });
 
-router.patch('/dolls/:id', ensureSession, (req, res) => {
+router.patch('/dolls/:id', ensureSession, async (req, res) => {
   const dollId = req.params.id;
   const sessionId = req.session!.id;
   const rawName = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
@@ -628,7 +627,7 @@ router.patch('/dolls/:id', ensureSession, (req, res) => {
     return;
   }
 
-  const row = db
+  const row = await db
     .prepare(`SELECT id, kind, owner_session_id FROM dolls WHERE id = ?`)
     .get(dollId) as { id: string; kind: string; owner_session_id: string | null } | undefined;
 
@@ -642,8 +641,8 @@ router.patch('/dolls/:id', ensureSession, (req, res) => {
     return;
   }
 
-  db.prepare(`UPDATE dolls SET name = ? WHERE id = ?`).run(rawName, dollId);
-  db.prepare(
+  await db.prepare(`UPDATE dolls SET name = ? WHERE id = ?`).run(rawName, dollId);
+  await db.prepare(
     `UPDATE memories
      SET value = ?
      WHERE doll_id = ? AND session_id = ? AND type = 'doll_name'`
@@ -655,11 +654,11 @@ router.patch('/dolls/:id', ensureSession, (req, res) => {
 // ============================================================
 // 5. Messages & Streaming Chat (SSE)
 // ============================================================
-router.get('/dolls/:id/messages', ensureSession, (req, res) => {
+router.get('/dolls/:id/messages', ensureSession, async (req, res) => {
   const dollId = req.params.id;
   const sessionId = req.session!.id;
 
-  const dollExists = db.prepare(`SELECT id FROM dolls WHERE id = ?`).get(dollId);
+  const dollExists = await db.prepare(`SELECT id FROM dolls WHERE id = ?`).get(dollId);
   if (!dollExists) {
     sendError(req, res, 404, 'NOT_FOUND', '未找到对应的娃娃');
     return;
@@ -670,7 +669,7 @@ router.get('/dolls/:id/messages', ensureSession, (req, res) => {
 
   let rows: Array<Record<string, unknown>>;
   if (cursor) {
-    rows = db
+    rows = await db
       .prepare(
         `SELECT id, client_message_id, reply_attempt, role, content, status, provider, first_token_ms, total_ms, error_code, created_at
          FROM messages
@@ -680,7 +679,7 @@ router.get('/dolls/:id/messages', ensureSession, (req, res) => {
       )
       .all(sessionId, dollId, cursor, limit) as Array<Record<string, unknown>>;
   } else {
-    rows = db
+    rows = await db
       .prepare(
         `SELECT id, client_message_id, reply_attempt, role, content, status, provider, first_token_ms, total_ms, error_code, created_at
          FROM messages
@@ -734,7 +733,7 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     return;
   }
 
-  const dollRow = db
+  const dollRow = await db
     .prepare(
       `SELECT d.id, d.kind, d.name,
               p.id AS persona_id, p.name AS persona_name, p.mbti AS persona_mbti,
@@ -767,27 +766,61 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     return;
   }
 
-  const chatKey = `${sessionId}:${dollId}:${clientMessageId}`;
-  if (inFlightChats.has(chatKey)) {
-    sendError(req, res, 409, 'TASK_ALREADY_RUNNING', '该消息正在生成回复中，请勿重复发送');
-    return;
-  }
+  const { chatProviderMode: providerMode } = await getRuntimeSettings();
+  const now = new Date().toISOString();
+  const assistantMessageId = `reply_${crypto.randomBytes(8).toString('hex')}`;
 
-  const runtimeSettings = getRuntimeSettings();
-  const providerMode = runtimeSettings.chatProviderMode;
+  const claim = await db.transaction(async () => {
+    const user = await db.prepare(
+      `SELECT content FROM messages
+       WHERE session_id = ? AND doll_id = ? AND client_message_id = ? AND role = 'user'`
+    ).get(sessionId, dollId, clientMessageId) as { content: string } | undefined;
+    if (user && user.content !== text) {
+      throw Object.assign(new Error('相同消息编号对应了不同的内容'), { status: 409, code: 'IDEMPOTENCY_CONFLICT' });
+    }
 
-  const completedReply = db
-    .prepare(
-      `SELECT id, content, provider, status
-       FROM messages
+    const completed = await db.prepare(
+      `SELECT id, content, provider FROM messages
        WHERE session_id = ? AND doll_id = ? AND client_message_id = ? AND role = 'assistant' AND status = 'completed'
-       ORDER BY reply_attempt DESC
-       LIMIT 1`
-    )
-    .get(sessionId, dollId, clientMessageId) as
-    | { id: string; content: string; provider: string; status: string }
-    | undefined;
+       ORDER BY reply_attempt DESC LIMIT 1`
+    ).get(sessionId, dollId, clientMessageId) as { id: string; content: string; provider: string } | undefined;
+    if (completed) return { completed };
 
+    if (providerMode === 'cloud' && !isChatCloudConfigured()) {
+      throw Object.assign(new Error('阶跃星辰对话尚未配置 STEPFUN_API_KEY'), { status: 503, code: 'PROVIDER_NOT_CONFIGURED' });
+    }
+
+    // A serverless timeout can leave a stream open in the database. A new user retry may reclaim it.
+    const staleBefore = new Date(Date.now() - 75_000).toISOString();
+    await db.prepare(
+      `UPDATE messages SET status = 'incomplete', error_code = 'STREAM_INTERRUPTED'
+       WHERE session_id = ? AND doll_id = ? AND client_message_id = ? AND role = 'assistant'
+         AND status IN ('pending', 'streaming') AND created_at < ?`
+    ).run(sessionId, dollId, clientMessageId, staleBefore);
+    const attempt = await db.prepare(
+      `SELECT COALESCE(MAX(reply_attempt), 0) AS count,
+              COALESCE(SUM(CASE WHEN status IN ('pending', 'streaming') THEN 1 ELSE 0 END), 0) AS active
+       FROM messages WHERE session_id = ? AND doll_id = ? AND client_message_id = ? AND role = 'assistant'`
+    ).get(sessionId, dollId, clientMessageId) as { count: number; active: number };
+    if (attempt.active) {
+      throw Object.assign(new Error('该消息正在生成回复中'), { status: 409, code: 'TASK_ALREADY_RUNNING' });
+    }
+
+    if (!user) {
+      await db.prepare(
+        `INSERT INTO messages (id, session_id, doll_id, client_message_id, reply_attempt, role, content, status, created_at)
+         VALUES (?, ?, ?, ?, 0, 'user', ?, 'completed', ?)`
+      ).run(`msg_${crypto.randomBytes(8).toString('hex')}`, sessionId, dollId, clientMessageId, text, now);
+    }
+    const replyAttempt = attempt.count + 1;
+    await db.prepare(
+      `INSERT INTO messages (id, session_id, doll_id, client_message_id, reply_attempt, role, content, status, provider, created_at)
+       VALUES (?, ?, ?, ?, ?, 'assistant', '', 'streaming', ?, ?)`
+    ).run(assistantMessageId, sessionId, dollId, clientMessageId, replyAttempt, providerMode, new Date().toISOString());
+    return { replyAttempt };
+  })();
+
+  const completedReply = claim.completed;
   if (completedReply) {
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -809,102 +842,7 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     return;
   }
 
-  if (providerMode === 'cloud' && !isChatCloudConfigured()) {
-    sendError(
-      req,
-      res,
-      503,
-      'PROVIDER_NOT_CONFIGURED',
-      '当前对话模式为 cloud，但服务端未配置有效的 GEMINI_API_KEY 或 CHAT_API_KEY（可在 /dev 控制台切换为演示模式）'
-    );
-    return;
-  }
-
-  const now = new Date().toISOString();
-  db.prepare(
-    `INSERT OR IGNORE INTO messages (id, session_id, doll_id, client_message_id, reply_attempt, role, content, status, created_at)
-     VALUES (?, ?, ?, ?, 0, 'user', ?, 'completed', ?)`
-  ).run(`msg_${crypto.randomBytes(8).toString('hex')}`, sessionId, dollId, clientMessageId, text, now);
-
-  let savedMemoryId: string | null = null;
-  let rememberToSave = explicitRemember;
-  if (!rememberToSave) {
-    const match = text.match(/^记住[：:]\s*(.+)$/);
-    if (match && match[1].trim()) {
-      rememberToSave = match[1].trim();
-    }
-  }
-  if (rememberToSave) {
-    const existingMem = db
-      .prepare(
-        `SELECT id FROM memories WHERE session_id = ? AND doll_id = ? AND type = 'fact' AND value = ? LIMIT 1`
-      )
-      .get(sessionId, dollId, rememberToSave) as { id: string } | undefined;
-
-    if (!existingMem) {
-      savedMemoryId = `mem_${crypto.randomBytes(8).toString('hex')}`;
-      db.prepare(
-        `INSERT INTO memories (id, session_id, doll_id, type, value, source, created_at)
-         VALUES (?, ?, ?, 'fact', ?, ?, ?)`
-      ).run(
-        savedMemoryId,
-        sessionId,
-        dollId,
-        rememberToSave.slice(0, 300),
-        explicitRemember ? 'chat_explicit_field' : 'chat_prefix_rule',
-        now
-      );
-    } else {
-      savedMemoryId = existingMem.id;
-    }
-  }
-
-  const lastAttemptRow = db
-    .prepare(
-      `SELECT MAX(reply_attempt) AS max_attempt
-       FROM messages
-       WHERE session_id = ? AND doll_id = ? AND client_message_id = ? AND role = 'assistant'`
-    )
-    .get(sessionId, dollId, clientMessageId) as { max_attempt: number | null };
-  const replyAttempt = (lastAttemptRow?.max_attempt ?? 0) + 1;
-
-  const memories = db
-    .prepare(
-      `SELECT type, value, source
-       FROM memories
-       WHERE session_id = ? AND doll_id = ?
-       ORDER BY created_at ASC`
-    )
-    .all(sessionId, dollId) as Array<{ type: string; value: string; source: string }>;
-
-  const historyRows = db
-    .prepare(
-      `SELECT role, content
-       FROM messages
-       WHERE session_id = ? AND doll_id = ? AND status = 'completed'
-         AND NOT (role = 'user' AND client_message_id = ?)
-       ORDER BY created_at DESC, rowid DESC
-       LIMIT ?`
-    )
-    .all(sessionId, dollId, clientMessageId, config.chatContextMaxMessages) as Array<{
-    role: 'user' | 'assistant';
-    content: string;
-  }>;
-  historyRows.reverse();
-
-  const assistantMessageId = `reply_${crypto.randomBytes(8).toString('hex')}`;
-  const replyCreatedAt = new Date(Date.now() + 2).toISOString();
-  db.prepare(
-    `INSERT INTO messages (id, session_id, doll_id, client_message_id, reply_attempt, role, content, status, provider, created_at)
-     VALUES (?, ?, ?, ?, ?, 'assistant', '', 'streaming', ?, ?)`
-  ).run(assistantMessageId, sessionId, dollId, clientMessageId, replyAttempt, providerMode, replyCreatedAt);
-
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders?.();
-
-  inFlightChats.add(chatKey);
+  const { replyAttempt } = claim;
   const abortController = new AbortController();
   let clientClosed = false;
   res.on('close', () => {
@@ -914,20 +852,82 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     }
   });
 
-  writeSseEvent(res, 'meta', {
-    requestId: req.requestId,
-    clientMessageId,
-    assistantMessageId,
-    provider: providerMode,
-    savedMemoryId,
-  });
-
-  const startedAt = Date.now();
+  let startedAt = Date.now();
   let firstTokenMs: number | null = null;
   let accumulated = '';
   let endedWithEvent = false;
-
   try {
+    let savedMemoryId: string | null = null;
+    let rememberToSave = explicitRemember;
+    if (!rememberToSave) {
+      const match = text.match(/^记住[：:]\s*(.+)$/);
+      if (match && match[1].trim()) {
+        rememberToSave = match[1].trim();
+      }
+    }
+    if (rememberToSave) {
+      const existingMem = await db
+        .prepare(
+          `SELECT id FROM memories WHERE session_id = ? AND doll_id = ? AND type = 'fact' AND value = ? LIMIT 1`
+        )
+        .get(sessionId, dollId, rememberToSave) as { id: string } | undefined;
+
+      if (!existingMem) {
+        savedMemoryId = `mem_${crypto.randomBytes(8).toString('hex')}`;
+        await db.prepare(
+          `INSERT INTO memories (id, session_id, doll_id, type, value, source, created_at)
+           VALUES (?, ?, ?, 'fact', ?, ?, ?)`
+        ).run(
+          savedMemoryId,
+          sessionId,
+          dollId,
+          rememberToSave.slice(0, 300),
+          explicitRemember ? 'chat_explicit_field' : 'chat_prefix_rule',
+          now
+        );
+      } else {
+        savedMemoryId = existingMem.id;
+      }
+    }
+
+    const memories = await db
+      .prepare(
+        `SELECT type, value, source
+         FROM memories
+         WHERE session_id = ? AND doll_id = ?
+         ORDER BY created_at ASC`
+      )
+      .all(sessionId, dollId) as Array<{ type: string; value: string; source: string }>;
+
+    const historyRows = await db
+      .prepare(
+        `SELECT role, content
+         FROM messages
+         WHERE session_id = ? AND doll_id = ? AND status = 'completed'
+           AND NOT (role = 'user' AND client_message_id = ?)
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ?`
+      )
+      .all(sessionId, dollId, clientMessageId, config.chatContextMaxMessages) as Array<{
+      role: 'user' | 'assistant';
+      content: string;
+    }>;
+    historyRows.reverse();
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    writeSseEvent(res, 'meta', {
+      requestId: req.requestId,
+      clientMessageId,
+      assistantMessageId,
+      provider: providerMode,
+      savedMemoryId,
+    });
+
+    startedAt = Date.now();
     const provider = getChatProvider(providerMode);
     for await (const event of provider.streamChat({
       dollName: dollRow.name,
@@ -958,13 +958,13 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
         writeSseEvent(res, 'delta', { text: event.text });
       } else if (event.type === 'done') {
         const totalMs = Date.now() - startedAt;
-        db.prepare(
+        await db.prepare(
           `UPDATE messages
            SET content = ?, status = 'completed', provider_request_id = ?, first_token_ms = ?, total_ms = ?
            WHERE id = ?`
         ).run(accumulated, event.providerRequestId ?? null, firstTokenMs, totalMs, assistantMessageId);
 
-        recordRunLog({
+        await recordRunLog({
           id: `log_${crypto.randomBytes(6).toString('hex')}`,
           kind: 'chat',
           provider: providerMode,
@@ -988,13 +988,13 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
       } else if (event.type === 'error') {
         const totalMs = Date.now() - startedAt;
         const failStatus = accumulated.length > 0 ? 'incomplete' : 'failed';
-        db.prepare(
+        await db.prepare(
           `UPDATE messages
            SET content = ?, status = ?, error_code = ?, first_token_ms = ?, total_ms = ?
            WHERE id = ?`
         ).run(accumulated, failStatus, event.code, firstTokenMs, totalMs, assistantMessageId);
 
-        recordRunLog({
+        await recordRunLog({
           id: `log_${crypto.randomBytes(6).toString('hex')}`,
           kind: 'chat',
           provider: providerMode,
@@ -1019,7 +1019,7 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
 
     if (!endedWithEvent) {
       const totalMs = Date.now() - startedAt;
-      db.prepare(
+      await db.prepare(
         `UPDATE messages
          SET content = ?, status = 'incomplete', error_code = 'STREAM_INTERRUPTED', first_token_ms = ?, total_ms = ?
          WHERE id = ?`
@@ -1035,13 +1035,14 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
     }
   } catch (err: unknown) {
     const totalMs = Date.now() - startedAt;
-    const message = err instanceof Error ? err.message : '对话执行发生未知错误';
-    db.prepare(
+    const message = '对话暂时中断，请重试';
+    await db.prepare(
       `UPDATE messages
        SET content = ?, status = 'failed', error_code = 'PROVIDER_ERROR', first_token_ms = ?, total_ms = ?
-       WHERE id = ?`
+       WHERE id = ? AND status = 'streaming'`
     ).run(accumulated, firstTokenMs, totalMs, assistantMessageId);
 
+    if (!res.headersSent) throw err;
     if (!clientClosed && !res.writableEnded) {
       writeSseEvent(res, 'error', {
         code: 'PROVIDER_ERROR',
@@ -1050,8 +1051,7 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
       });
     }
   } finally {
-    inFlightChats.delete(chatKey);
-    if (!res.writableEnded) {
+    if (res.headersSent && !res.writableEnded) {
       res.end();
     }
   }
@@ -1060,17 +1060,17 @@ router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
 // ============================================================
 // 6. Explicit Memory CRUD (scoped by sessionId + dollId)
 // ============================================================
-router.get('/dolls/:id/memory', ensureSession, (req, res) => {
+router.get('/dolls/:id/memory', ensureSession, async (req, res) => {
   const dollId = req.params.id;
   const sessionId = req.session!.id;
 
-  const dollExists = db.prepare(`SELECT id FROM dolls WHERE id = ?`).get(dollId);
+  const dollExists = await db.prepare(`SELECT id FROM dolls WHERE id = ?`).get(dollId);
   if (!dollExists) {
     sendError(req, res, 404, 'NOT_FOUND', '未找到对应的娃娃');
     return;
   }
 
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT id, type, value, source, created_at
        FROM memories
@@ -1093,11 +1093,11 @@ router.get('/dolls/:id/memory', ensureSession, (req, res) => {
 
 const ALLOWED_MEMORY_TYPES = new Set(['user_nickname', 'doll_name', 'persona', 'accessories', 'fact']);
 
-router.post('/dolls/:id/memory', ensureSession, (req, res) => {
+router.post('/dolls/:id/memory', ensureSession, async (req, res) => {
   const dollId = req.params.id;
   const sessionId = req.session!.id;
 
-  const dollExists = db.prepare(`SELECT id FROM dolls WHERE id = ?`).get(dollId);
+  const dollExists = await db.prepare(`SELECT id FROM dolls WHERE id = ?`).get(dollId);
   if (!dollExists) {
     sendError(req, res, 404, 'NOT_FOUND', '未找到对应的娃娃');
     return;
@@ -1117,13 +1117,13 @@ router.post('/dolls/:id/memory', ensureSession, (req, res) => {
 
   const now = new Date().toISOString();
   if (type === 'user_nickname') {
-    db.prepare(
+    await db.prepare(
       `DELETE FROM memories WHERE session_id = ? AND doll_id = ? AND type = 'user_nickname'`
     ).run(sessionId, dollId);
   }
 
   const memoryId = `mem_${crypto.randomBytes(8).toString('hex')}`;
-  db.prepare(
+  await db.prepare(
     `INSERT INTO memories (id, session_id, doll_id, type, value, source, created_at)
      VALUES (?, ?, ?, ?, ?, 'manual', ?)`
   ).run(memoryId, sessionId, dollId, type, value, now);
@@ -1142,12 +1142,12 @@ router.post('/dolls/:id/memory', ensureSession, (req, res) => {
   );
 });
 
-router.delete('/dolls/:id/memory/:memoryId', ensureSession, (req, res) => {
+router.delete('/dolls/:id/memory/:memoryId', ensureSession, async (req, res) => {
   const dollId = req.params.id;
   const memoryId = req.params.memoryId;
   const sessionId = req.session!.id;
 
-  const del = db
+  const del = await db
     .prepare(`DELETE FROM memories WHERE id = ? AND doll_id = ? AND session_id = ?`)
     .run(memoryId, dollId, sessionId);
 
@@ -1161,12 +1161,12 @@ router.delete('/dolls/:id/memory/:memoryId', ensureSession, (req, res) => {
 // ============================================================
 // 7. Cards, Versions, Redraw, Cancel, Fallback & Bind
 // ============================================================
-router.get('/cards', ensureSession, (req, res) => {
+router.get('/cards', ensureSession, async (req, res) => {
   const sessionId = req.session!.id;
-  const baseUrl = getLiveBaseUrl(req);
+  const baseUrl = await getLiveBaseUrl(req);
   const maxAttempts = 1 + config.maxRegenerations;
 
-  const cards = db
+  const cards = await db
     .prepare(
       `SELECT c.*, p.name AS persona_name, p.mbti AS persona_mbti
        FROM cards c
@@ -1182,8 +1182,8 @@ router.get('/cards', ensureSession, (req, res) => {
 
   sendSuccess(
     res,
-    cards.map((c) => {
-      const versions = (versionsStmt.all(c.id) as Array<Record<string, unknown>>).map(formatCardVersion);
+    await Promise.all(cards.map(async (c) => {
+      const versions = (await versionsStmt.all(c.id) as Array<Record<string, unknown>>).map(formatCardVersion);
       return {
         id: c.id,
         userNickname: c.user_nickname,
@@ -1201,160 +1201,127 @@ router.get('/cards', ensureSession, (req, res) => {
         createdAt: c.created_at,
         versions,
       };
-    })
+    }))
   );
 });
 
-router.post('/cards', ensureSession, (req, res) => {
-  upload.single('photo')(req, res, (multerErr) => {
-    if (multerErr) {
-      const isSizeErr = multerErr instanceof multer.MulterError && multerErr.code === 'LIMIT_FILE_SIZE';
-      sendError(
-        req,
-        res,
-        isSizeErr ? 413 : 400,
-        isSizeErr ? 'IMAGE_TOO_LARGE' : 'INVALID_INPUT',
-        isSizeErr ? '图片体积超过限制（最大 2 MB）' : multerErr.message
-      );
-      return;
-    }
+router.post('/cards', ensureSession, uploadPhoto, async (req, res) => {
+  const sessionId = req.session!.id;
+  const idempotencyKey = extractIdempotencyKey(req);
+  const userNickname = typeof req.body?.userNickname === 'string' ? req.body.userNickname.trim() : '';
+  const personaId = typeof req.body?.personaId === 'string' ? req.body.personaId.trim() : '';
 
-    const sessionId = req.session!.id;
-    const idempotencyKey = extractIdempotencyKey(req);
-    const userNickname = typeof req.body?.userNickname === 'string' ? req.body.userNickname.trim() : '';
-    const personaId = typeof req.body?.personaId === 'string' ? req.body.personaId.trim() : '';
-
-    let accessoryIds: string[] = [];
-    if (Array.isArray(req.body?.accessoryIds)) {
-      accessoryIds = req.body.accessoryIds.map(String);
-    } else if (typeof req.body?.accessoryIds === 'string' && req.body.accessoryIds.trim()) {
-      try {
-        const parsed = JSON.parse(req.body.accessoryIds);
-        accessoryIds = Array.isArray(parsed)
-          ? parsed.map(String)
-          : req.body.accessoryIds.split(',').map((s: string) => s.trim()).filter(Boolean);
-      } catch {
-        accessoryIds = req.body.accessoryIds.split(',').map((s: string) => s.trim()).filter(Boolean);
-      }
-    }
-
-    // Validate against live in-stock SQLite craft materials
-    const inStockMaterials = listMaterials(true);
-    const validMaterialSet = new Set(inStockMaterials.map((m) => m.id));
-    accessoryIds = Array.from(new Set(accessoryIds.filter((id) => validMaterialSet.has(id)))).slice(0, 6);
-
-    if (!req.file?.buffer) {
-      sendError(req, res, 400, 'INVALID_INPUT', '请上传一张 JPEG、PNG 或 WebP 照片');
-      return;
-    }
-    if (!userNickname || userNickname.length > 32) {
-      sendError(req, res, 400, 'INVALID_INPUT', '请填写 1–32 字的你的称呼');
-      return;
-    }
-    const personaExists = db.prepare(`SELECT id FROM personas WHERE id = ?`).get(personaId);
-    if (!personaExists) {
-      sendError(req, res, 400, 'INVALID_INPUT', '请选择有效的人格设定');
-      return;
-    }
-
-    let validatedImage;
+  let accessoryIds: string[] = [];
+  if (Array.isArray(req.body?.accessoryIds)) {
+    accessoryIds = req.body.accessoryIds.map(String);
+  } else if (typeof req.body?.accessoryIds === 'string' && req.body.accessoryIds.trim()) {
     try {
-      validatedImage = validateImageBuffer(req.file.buffer);
-    } catch (err: unknown) {
-      const e = err as { status?: number; code?: string; message?: string };
-      sendError(req, res, e.status || 400, e.code || 'UNSUPPORTED_IMAGE', e.message || '图片校验失败');
-      return;
+      const parsed = JSON.parse(req.body.accessoryIds);
+      accessoryIds = Array.isArray(parsed)
+        ? parsed.map(String)
+        : req.body.accessoryIds.split(',').map((s: string) => s.trim()).filter(Boolean);
+    } catch {
+      accessoryIds = req.body.accessoryIds.split(',').map((s: string) => s.trim()).filter(Boolean);
     }
+  }
 
-    const photoHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
-    const requestHash = hashObject({ userNickname, personaId, accessoryIds, photoHash });
-    const idem = checkIdempotency(sessionId, 'create_card', idempotencyKey, requestHash);
-    if (idem.hit) {
-      if (idem.conflict) {
-        sendError(req, res, 409, 'IDEMPOTENCY_CONFLICT', '相同幂等键提交了不同的创作参数');
-        return;
-      }
-      res.status(idem.status).json(idem.body);
-      return;
+  // Validate against live in-stock SQLite craft materials
+  const inStockMaterials = await listMaterials(true);
+  const validMaterialSet = new Set(inStockMaterials.map((m) => m.id));
+  accessoryIds = Array.from(new Set(accessoryIds.filter((id) => validMaterialSet.has(id)))).slice(0, 6);
+
+  if (!req.file?.buffer) {
+    sendError(req, res, 400, 'INVALID_INPUT', '请上传一张 JPEG、PNG 或 WebP 照片');
+    return;
+  }
+  if (!userNickname || userNickname.length > 32) {
+    sendError(req, res, 400, 'INVALID_INPUT', '请填写 1–32 字的你的称呼');
+    return;
+  }
+  const personaExists = await db.prepare(`SELECT id FROM personas WHERE id = ?`).get(personaId);
+  if (!personaExists) {
+    sendError(req, res, 400, 'INVALID_INPUT', '请选择有效的人格设定');
+    return;
+  }
+
+  let validatedImage;
+  try {
+    validatedImage = validateImageBuffer(req.file.buffer);
+  } catch (err: unknown) {
+    const e = err as { status?: number; code?: string; message?: string };
+    sendError(req, res, e.status || 400, e.code || 'UNSUPPORTED_IMAGE', e.message || '图片校验失败');
+    return;
+  }
+
+  const photoHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+  const simulateFail = req.get('x-mock-fail') === 'true';
+  const requestHash = hashObject({ userNickname, personaId, accessoryIds, photoHash, simulateFail });
+  const cached = await checkIdempotency<{ data: { versionId: string } }>(
+    sessionId, 'create_card', idempotencyKey, requestHash,
+  );
+  if (cached.hit) {
+    if (cached.conflict) {
+      sendError(req, res, 409, 'IDEMPOTENCY_CONFLICT', '相同幂等键提交了不同的创作参数');
+    } else {
+      await enqueueImageVersion(cached.body.data.versionId);
+      res.status(cached.status).json(cached.body);
     }
+    return;
+  }
 
-    const runtimeSettings = getRuntimeSettings();
-    const providerMode = runtimeSettings.imageProviderMode;
-    if (providerMode === 'cloud' && !isImageCloudConfigured()) {
-      sendError(
-        req,
-        res,
-        503,
-        'PROVIDER_NOT_CONFIGURED',
-        '当前出图模式为 cloud，但服务端未配置有效的 GEMINI_API_KEY 或 IMAGE_API_KEY（可在 /dev 控制台切换为演示模式）'
-      );
-      return;
-    }
+  const settings = await getRuntimeSettings();
+  const provider = settings.imageProviderMode;
+  if (provider === 'cloud' && !isImageCloudConfigured(settings.imageVendor)) {
+    sendError(req, res, 503, 'PROVIDER_NOT_CONFIGURED', '当前生图服务尚未配置密钥');
+    return;
+  }
 
-    const cardId = `card_${crypto.randomBytes(8).toString('hex')}`;
-    const versionId = `ver_${crypto.randomBytes(8).toString('hex')}`;
-    const photoFilename = `${cardId}.${validatedImage.ext}`;
-    const photoAbsPath = path.join(config.storagePath, 'photos', photoFilename);
-    fs.writeFileSync(photoAbsPath, req.file.buffer);
+  const cardId = `card_${crypto.randomBytes(8).toString('hex')}`;
+  const versionId = `ver_${crypto.randomBytes(8).toString('hex')}`;
+  const photoFilename = `${cardId}.${validatedImage.ext}`;
+  const baseUrl = buildPublicBaseUrl(req, settings.nfcPublicBaseUrl);
+  const now = new Date();
+  const expires = new Date(now.getTime() + config.photoTtlHours * 3600_000).toISOString();
+  const timestamp = now.toISOString();
+  // Schedule deletion before writing so an interrupted upload cannot leave a permanent photo.
+  await schedulePhotoCleanup(photoFilename);
+  await writeMedia(`photos/${photoFilename}`, req.file.buffer, validatedImage.mimeType);
 
-    const now = new Date();
-    const photoExpiresAt = new Date(now.getTime() + config.photoTtlHours * 3600 * 1000).toISOString();
-    const nowIso = now.toISOString();
-    const resultKind = providerMode === 'cloud' ? 'generated' : 'mock';
-
-    const createTx = db.transaction(() => {
-      db.prepare(
-        `INSERT INTO cards (id, owner_session_id, photo_ref, photo_mime, photo_expires_at, user_nickname, persona_id, accessory_ids, active_version_id, bound_doll_id, generation_attempts, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?)`
-      ).run(
-        cardId,
-        sessionId,
-        photoFilename,
-        validatedImage.mimeType,
-        photoExpiresAt,
-        userNickname,
-        personaId,
-        JSON.stringify(accessoryIds),
-        versionId,
-        nowIso
-      );
-
-      db.prepare(
-        `INSERT INTO card_versions (id, card_id, version_number, status, provider, result_kind, created_at)
-         VALUES (?, ?, 1, 'queued', ?, ?, ?)`
-      ).run(versionId, cardId, providerMode, resultKind, nowIso);
-    });
-    createTx();
-
-    if (req.get('x-mock-fail') === 'true' && providerMode === 'mock') {
-      markVersionSimulateFail(versionId);
-    }
-
-    const baseUrl = getLiveBaseUrl(req);
-    const responsePayload = {
-      data: {
-        cardId,
-        versionId,
-        status: 'queued',
-        provider: providerMode,
-        imageModelTier: runtimeSettings.imageModelTier,
-        cardUrl: `${baseUrl}/card/${cardId}`,
-        processingUrl: `${baseUrl}/create/processing?cardId=${cardId}`,
-      },
-    };
-    saveIdempotency(sessionId, 'create_card', idempotencyKey, requestHash, 202, responsePayload);
-    enqueueImageVersion(versionId);
-
-    res.status(202).json(responsePayload);
+  const payload = await persistTask(sessionId, 'create_card', idempotencyKey, requestHash, async () => {
+    await db.prepare(
+      `INSERT INTO cards (id, owner_session_id, photo_ref, photo_mime, photo_expires_at, user_nickname, persona_id,
+                         accessory_ids, active_version_id, generation_attempts, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
+    ).run(cardId, sessionId, photoFilename, validatedImage.mimeType, expires, userNickname, personaId,
+      JSON.stringify(accessoryIds), versionId, timestamp);
+    await db.prepare(
+      `INSERT INTO card_versions (id, card_id, version_number, status, provider, result_kind, created_at, image_settings, simulate_fail)
+       VALUES (?, ?, 1, 'queued', ?, ?, ?, ?, ?)`
+    ).run(versionId, cardId, provider, provider === 'cloud' ? 'generated' : 'mock', timestamp,
+      snapshotImageSettings(settings), Number(provider === 'mock' && simulateFail));
+    return { data: {
+      cardId, versionId, status: 'queued', provider,
+      imageModelTier: settings.imageModelTier,
+      cardUrl: `${baseUrl}/card/${cardId}`,
+      processingUrl: `${baseUrl}/create/processing?cardId=${cardId}`,
+    } };
+  }).catch(async (error) => {
+    // A transport failure may have happened after commit. Keep the photo if the card exists.
+    const saved = await db.prepare('SELECT 1 FROM cards WHERE id = ?').get(cardId).catch(() => true);
+    if (!saved) await deleteMedia(`photos/${photoFilename}`).catch(() => {});
+    throw error;
   });
+  if (payload.data.cardId !== cardId) await deleteMedia(`photos/${photoFilename}`).catch(() => {});
+  await enqueueImageVersion(payload.data.versionId);
+  res.status(202).json(payload);
 });
 
 router.get('/cards/:id', ensureSession, async (req, res) => {
   const cardId = req.params.id;
   const sessionId = req.session!.id;
-  const baseUrl = getLiveBaseUrl(req);
+  const baseUrl = await getLiveBaseUrl(req);
 
-  const card = db
+  const card = await db
     .prepare(
       `SELECT c.*, p.name AS persona_name, p.mbti AS persona_mbti, p.tagline AS persona_tagline, p.material_hint AS persona_material_hint
        FROM cards c
@@ -1368,15 +1335,17 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
     return;
   }
 
-  const versionRows = db
+  const versionRows = await db
     .prepare(`SELECT * FROM card_versions WHERE card_id = ? ORDER BY version_number ASC`)
     .all(cardId) as Array<Record<string, unknown>>;
 
+  const queued = versionRows.find((row) => row.status === 'queued');
+  if (queued) await recoverQueuedDelivery('image', queued);
+
   const maxAttempts = 1 + config.maxRegenerations;
   const attempts = Number(card.generation_attempts || 0);
-  const photoPath = path.join(config.storagePath, 'photos', String(card.photo_ref));
-  const photoExpired =
-    !fs.existsSync(photoPath) || new Date(String(card.photo_expires_at)).getTime() < Date.now();
+  const photoExpired = Date.parse(String(card.photo_expires_at)) <= Date.now() ||
+    !await mediaExists(`photos/${card.photo_ref}`);
 
   const cardUrl = `${baseUrl}/card/${cardId}`;
   const dollUrl = card.bound_doll_id ? `${baseUrl}/d/${card.bound_doll_id}` : null;
@@ -1384,7 +1353,7 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
 
   let boundDoll = null;
   if (card.bound_doll_id) {
-    const dRow = db
+    const dRow = await db
       .prepare(`SELECT id, name, avatar_url, card_version_id, created_at FROM dolls WHERE id = ?`)
       .get(card.bound_doll_id) as Record<string, unknown> | undefined;
     if (dRow) {
@@ -1414,7 +1383,7 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
       materialHint: card.persona_material_hint,
     },
     accessoryIds: parsedAccIds,
-    accessoryLabels: resolveMaterialLabels(parsedAccIds),
+    accessoryLabels: await resolveMaterialLabels(parsedAccIds),
     activeVersionId: card.active_version_id,
     boundDollId: card.bound_doll_id ?? null,
     boundDoll,
@@ -1431,11 +1400,11 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
   });
 });
 
-router.get('/cards/:id/photo', ensureSession, (req, res) => {
+router.get('/cards/:id/photo', ensureSession, async (req, res) => {
   const cardId = req.params.id;
   const sessionId = req.session!.id;
 
-  const card = db
+  const card = await db
     .prepare(`SELECT photo_ref, photo_mime, photo_expires_at FROM cards WHERE id = ? AND owner_session_id = ?`)
     .get(cardId, sessionId) as
     | { photo_ref: string; photo_mime: string; photo_expires_at: string }
@@ -1446,22 +1415,23 @@ router.get('/cards/:id/photo', ensureSession, (req, res) => {
     return;
   }
 
-  const photoPath = path.join(config.storagePath, 'photos', card.photo_ref);
-  if (!fs.existsSync(photoPath) || new Date(card.photo_expires_at).getTime() < Date.now()) {
+  const photo = Date.parse(card.photo_expires_at) > Date.now()
+    ? await openMedia(`photos/${card.photo_ref}`) : null;
+  if (!photo) {
     sendError(req, res, 410, 'PHOTO_EXPIRED', '原始照片已过期清理');
     return;
   }
 
   res.setHeader('Content-Type', card.photo_mime || 'image/jpeg');
-  res.setHeader('Cache-Control', 'private, max-age=300');
-  fs.createReadStream(photoPath).pipe(res);
+  res.setHeader('Cache-Control', 'private, no-store');
+  await pipeline(photo, res);
 });
 
-router.get('/card-versions/:id', ensureSession, (req, res) => {
+router.get('/card-versions/:id', ensureSession, async (req, res) => {
   const versionId = req.params.id;
   const sessionId = req.session!.id;
 
-  const row = db
+  const row = await db
     .prepare(
       `SELECT cv.*
        FROM card_versions cv
@@ -1475,137 +1445,104 @@ router.get('/card-versions/:id', ensureSession, (req, res) => {
     return;
   }
 
+  await recoverQueuedDelivery('image', row);
   sendSuccess(res, formatCardVersion(row));
 });
 
-router.post('/cards/:id/redraw', ensureSession, (req, res) => {
+router.post('/cards/:id/redraw', ensureSession, async (req, res) => {
   const cardId = req.params.id;
   const sessionId = req.session!.id;
   const idempotencyKey = extractIdempotencyKey(req);
   const simulateFail = req.get('x-mock-fail') === 'true' || req.body?.simulateFail === true;
-  const requestHash = hashObject({ cardId, action: 'redraw', simulateFail });
+  const reviewedUnknown = req.body?.reviewedUnknown === true;
+  const requestHash = hashObject({ cardId, action: 'redraw', simulateFail, reviewedUnknown });
 
-  const idem = checkIdempotency(sessionId, `redraw:${cardId}`, idempotencyKey, requestHash);
-  if (idem.hit) {
-    if (idem.conflict) {
-      sendError(req, res, 409, 'IDEMPOTENCY_CONFLICT', '相同幂等键提交了不同的重生成参数');
-      return;
-    }
-    res.status(idem.status).json(idem.body);
-    return;
-  }
-
-  const runtimeSettings = getRuntimeSettings();
+  const runtimeSettings = await getRuntimeSettings();
   const providerMode = runtimeSettings.imageProviderMode;
-  if (providerMode === 'cloud' && !isImageCloudConfigured()) {
-    sendError(
-      req,
-      res,
-      503,
-      'PROVIDER_NOT_CONFIGURED',
-      '当前出图模式为 cloud，但服务端未配置有效的生图密钥'
-    );
-    return;
-  }
-
   const maxAttempts = 1 + config.maxRegenerations;
-  let newVersionId = '';
-  let versionNumber = 0;
+  const payload = await persistTask(sessionId, `redraw:${cardId}`, idempotencyKey, requestHash, async () => {
+    if (providerMode === 'cloud' && !isImageCloudConfigured(runtimeSettings.imageVendor)) {
+      throw Object.assign(new Error('当前生图服务尚未配置密钥'), { status: 503, code: 'PROVIDER_NOT_CONFIGURED' });
+    }
+    const card = await db
+      .prepare(`SELECT * FROM cards WHERE id = ? AND owner_session_id = ?`)
+      .get(cardId, sessionId) as Record<string, unknown> | undefined;
 
-  try {
-    const redrawTx = db.transaction(() => {
-      const card = db
-        .prepare(`SELECT * FROM cards WHERE id = ? AND owner_session_id = ?`)
-        .get(cardId, sessionId) as Record<string, unknown> | undefined;
+    if (!card) {
+      throw Object.assign(new Error('未找到对应的创作卡片'), { status: 404, code: 'NOT_FOUND' });
+    }
+    if (card.bound_doll_id) {
+      throw Object.assign(new Error('该作品已绑定个人娃娃并冻结，无法继续重生成，请新建创作'), {
+        status: 409,
+        code: 'CARD_LOCKED',
+      });
+    }
 
-      if (!card) {
-        throw Object.assign(new Error('未找到对应的创作卡片'), { status: 404, code: 'NOT_FOUND' });
-      }
-      if (card.bound_doll_id) {
-        throw Object.assign(new Error('该作品已绑定个人娃娃并冻结，无法继续重生成，请新建创作'), {
-          status: 409,
-          code: 'CARD_LOCKED',
-        });
-      }
+    const latestCloudVersion = await db.prepare(
+      `SELECT error_code FROM card_versions WHERE card_id = ? AND provider = 'cloud'
+       ORDER BY version_number DESC LIMIT 1`
+    ).get(cardId) as { error_code: string | null } | undefined;
+    if (latestCloudVersion?.error_code === 'GENERATION_STATUS_UNKNOWN' && !reviewedUnknown) {
+      throw Object.assign(new Error('请核对上一次生图的结果和费用后再提交'), { status: 409, code: 'GENERATION_REVIEW_REQUIRED' });
+    }
 
-      const activeTask = db
-        .prepare(
-          `SELECT id FROM card_versions WHERE card_id = ? AND status IN ('queued', 'running') LIMIT 1`
-        )
-        .get(cardId);
-      if (activeTask) {
-        throw Object.assign(new Error('当前已有排队或运行中的生成任务，请等待完成或取消排队任务'), {
-          status: 409,
-          code: 'TASK_ALREADY_RUNNING',
-        });
-      }
+    const activeTask = await db
+      .prepare(
+        `SELECT id FROM card_versions WHERE card_id = ? AND status IN ('queued', 'running') LIMIT 1`
+      )
+      .get(cardId);
+    if (activeTask) {
+      throw Object.assign(new Error('当前已有排队或运行中的生成任务，请等待完成或取消排队任务'), {
+        status: 409,
+        code: 'TASK_ALREADY_RUNNING',
+      });
+    }
 
-      const photoPath = path.join(config.storagePath, 'photos', String(card.photo_ref));
-      if (!fs.existsSync(photoPath) || new Date(String(card.photo_expires_at)).getTime() < Date.now()) {
-        throw Object.assign(new Error('原始照片已过期清理，无法重生成，请新建创作并重新上传照片'), {
-          status: 410,
-          code: 'PHOTO_EXPIRED',
-        });
-      }
+    if (Date.parse(String(card.photo_expires_at)) <= Date.now()) {
+      throw Object.assign(new Error('原始照片已过期清理，无法重生成，请新建创作并重新上传照片'), {
+        status: 410,
+        code: 'PHOTO_EXPIRED',
+      });
+    }
 
-      const attempts = Number(card.generation_attempts || 0);
-      if (attempts >= maxAttempts) {
-        throw Object.assign(
-          new Error(`单次创作最多尝试 ${maxAttempts} 次模型生成（初次 + ${config.maxRegenerations} 次重生成），可选择已有成功版本或预设模板兜底`),
-          { status: 409, code: 'GENERATION_LIMIT_REACHED' }
-        );
-      }
+    const attempts = Number(card.generation_attempts || 0);
+    if (attempts >= maxAttempts) {
+      throw Object.assign(
+        new Error(`单次创作最多尝试 ${maxAttempts} 次模型生成（初次 + ${config.maxRegenerations} 次重生成），可选择已有成功版本或预设模板兜底`),
+        { status: 409, code: 'GENERATION_LIMIT_REACHED' }
+      );
+    }
 
-      const maxVerRow = db
-        .prepare(`SELECT MAX(version_number) AS max_v FROM card_versions WHERE card_id = ?`)
-        .get(cardId) as { max_v: number | null };
+    const maxVerRow = await db
+      .prepare(`SELECT MAX(version_number) AS max_v FROM card_versions WHERE card_id = ?`)
+      .get(cardId) as { max_v: number | null };
 
-      versionNumber = (maxVerRow?.max_v ?? 0) + 1;
-      newVersionId = `ver_${crypto.randomBytes(8).toString('hex')}`;
-      const resultKind = providerMode === 'cloud' ? 'generated' : 'mock';
-      const nowIso = new Date().toISOString();
+    const versionNumber = (maxVerRow?.max_v ?? 0) + 1;
+    const newVersionId = `ver_${crypto.randomBytes(8).toString('hex')}`;
+    const resultKind = providerMode === 'cloud' ? 'generated' : 'mock';
+    const nowIso = new Date().toISOString();
 
-      db.prepare(
-        `INSERT INTO card_versions (id, card_id, version_number, status, provider, result_kind, created_at)
-         VALUES (?, ?, ?, 'queued', ?, ?, ?)`
-      ).run(newVersionId, cardId, versionNumber, providerMode, resultKind, nowIso);
+    await db.prepare(
+      `INSERT INTO card_versions (id, card_id, version_number, status, provider, result_kind, created_at, image_settings, simulate_fail)
+       VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)`
+    ).run(newVersionId, cardId, versionNumber, providerMode, resultKind, nowIso, snapshotImageSettings(runtimeSettings), Number(simulateFail && providerMode === 'mock'));
 
-      db.prepare(
-        `UPDATE cards SET generation_attempts = generation_attempts + 1, active_version_id = ? WHERE id = ?`
-      ).run(newVersionId, cardId);
-    });
-    redrawTx();
-  } catch (err: unknown) {
-    const e = err as { status?: number; code?: string; message?: string };
-    sendError(req, res, e.status || 400, e.code || 'INVALID_INPUT', e.message || '无法发起重生成');
-    return;
-  }
-
-  if (simulateFail && providerMode === 'mock') {
-    markVersionSimulateFail(newVersionId);
-  }
-
-  const payload = {
-    data: {
-      cardId,
-      versionId: newVersionId,
-      versionNumber,
-      status: 'queued',
-      provider: providerMode,
-    },
-  };
-  saveIdempotency(sessionId, `redraw:${cardId}`, idempotencyKey, requestHash, 202, payload);
-  enqueueImageVersion(newVersionId);
+    await db.prepare(
+      `UPDATE cards SET generation_attempts = generation_attempts + 1, active_version_id = ? WHERE id = ?`
+    ).run(newVersionId, cardId);
+    return { data: { cardId, versionId: newVersionId, versionNumber, status: 'queued', provider: providerMode } };
+  });
+  await enqueueImageVersion(payload.data.versionId);
   res.status(202).json(payload);
 });
 
-router.post('/card-versions/:id/cancel', ensureSession, (req, res) => {
+router.post('/card-versions/:id/cancel', ensureSession, async (req, res) => {
   const versionId = req.params.id;
   const sessionId = req.session!.id;
   const idempotencyKey = extractIdempotencyKey(req);
   const requestHash = hashObject({ versionId, action: 'cancel' });
 
-  const idem = checkIdempotency(sessionId, `cancel:${versionId}`, idempotencyKey, requestHash);
+  const idem = await checkIdempotency(sessionId, `cancel:${versionId}`, idempotencyKey, requestHash);
   if (idem.hit) {
     if (idem.conflict) {
       sendError(req, res, 409, 'IDEMPOTENCY_CONFLICT', '幂等键冲突');
@@ -1615,7 +1552,7 @@ router.post('/card-versions/:id/cancel', ensureSession, (req, res) => {
     return;
   }
 
-  const row = db
+  const row = await db
     .prepare(
       `SELECT cv.id, cv.status, cv.provider
        FROM card_versions cv
@@ -1636,7 +1573,7 @@ router.post('/card-versions/:id/cancel', ensureSession, (req, res) => {
 
   if (row.status === 'cancelled') {
     const payload = { data: { versionId, status: 'cancelled' } };
-    saveIdempotency(sessionId, `cancel:${versionId}`, idempotencyKey, requestHash, 200, payload);
+    await saveIdempotency(sessionId, `cancel:${versionId}`, idempotencyKey, requestHash, 200, payload);
     res.status(200).json(payload);
     return;
   }
@@ -1646,7 +1583,7 @@ router.post('/card-versions/:id/cancel', ensureSession, (req, res) => {
     return;
   }
 
-  const updated = db
+  const updated = await db
     .prepare(
       `UPDATE card_versions
        SET status = 'cancelled', finished_at = ?
@@ -1659,7 +1596,7 @@ router.post('/card-versions/:id/cancel', ensureSession, (req, res) => {
     return;
   }
 
-  recordRunLog({
+  await recordRunLog({
     id: `log_${crypto.randomBytes(6).toString('hex')}`,
     kind: 'image',
     provider: row.provider,
@@ -1669,11 +1606,11 @@ router.post('/card-versions/:id/cancel', ensureSession, (req, res) => {
   });
 
   const payload = { data: { versionId, status: 'cancelled' } };
-  saveIdempotency(sessionId, `cancel:${versionId}`, idempotencyKey, requestHash, 200, payload);
+  await saveIdempotency(sessionId, `cancel:${versionId}`, idempotencyKey, requestHash, 200, payload);
   res.status(200).json(payload);
 });
 
-router.post('/cards/:id/fallback', ensureSession, (req, res) => {
+router.post('/cards/:id/fallback', ensureSession, async (req, res) => {
   const cardId = req.params.id;
   const sessionId = req.session!.id;
   const templateId = typeof req.body?.templateId === 'string' ? req.body.templateId.trim() : FALLBACK_TEMPLATES[0].id;
@@ -1686,7 +1623,7 @@ router.post('/cards/:id/fallback', ensureSession, (req, res) => {
   }
 
   const requestHash = hashObject({ cardId, templateId });
-  const idem = checkIdempotency(sessionId, `fallback:${cardId}`, idempotencyKey, requestHash);
+  const idem = await checkIdempotency(sessionId, `fallback:${cardId}`, idempotencyKey, requestHash);
   if (idem.hit) {
     if (idem.conflict) {
       sendError(req, res, 409, 'IDEMPOTENCY_CONFLICT', '相同幂等键提交了不同的模板编号');
@@ -1700,8 +1637,8 @@ router.post('/cards/:id/fallback', ensureSession, (req, res) => {
   let statusCode = 201;
 
   try {
-    const tx = db.transaction(() => {
-      const card = db
+    const tx = db.transaction(async () => {
+      const card = await db
         .prepare(`SELECT * FROM cards WHERE id = ? AND owner_session_id = ?`)
         .get(cardId, sessionId) as Record<string, unknown> | undefined;
 
@@ -1715,7 +1652,7 @@ router.post('/cards/:id/fallback', ensureSession, (req, res) => {
         });
       }
 
-      const running = db
+      const running = await db
         .prepare(`SELECT id FROM card_versions WHERE card_id = ? AND status IN ('queued', 'running') LIMIT 1`)
         .get(cardId);
       if (running) {
@@ -1725,30 +1662,31 @@ router.post('/cards/:id/fallback', ensureSession, (req, res) => {
         });
       }
 
-      const existingTpl = db
+      const existingTpl = await db
         .prepare(`SELECT * FROM card_versions WHERE card_id = ? AND result_kind = 'template' LIMIT 1`)
         .get(cardId) as Record<string, unknown> | undefined;
 
       if (existingTpl) {
-        db.prepare(`UPDATE card_versions SET result_url = ?, suggested_name = ? WHERE id = ?`).run(
+        await db.prepare(`UPDATE card_versions SET result_url = ?, suggested_name = ?, keywords = ? WHERE id = ?`).run(
           template.imageUrl,
           template.name.replace(' · 预设版', ''),
+          JSON.stringify([template.id, '预设模板']),
           existingTpl.id
         );
-        db.prepare(`UPDATE cards SET active_version_id = ? WHERE id = ?`).run(existingTpl.id, cardId);
-        versionRecord = db.prepare(`SELECT * FROM card_versions WHERE id = ?`).get(existingTpl.id) as Record<string, unknown>;
+        await db.prepare(`UPDATE cards SET active_version_id = ? WHERE id = ?`).run(existingTpl.id, cardId);
+        versionRecord = await db.prepare(`SELECT * FROM card_versions WHERE id = ?`).get(existingTpl.id) as Record<string, unknown>;
         statusCode = 201;
         return;
       }
 
-      const maxVer = db
+      const maxVer = await db
         .prepare(`SELECT MAX(version_number) AS max_v FROM card_versions WHERE card_id = ?`)
         .get(cardId) as { max_v: number | null };
       const versionNumber = (maxVer?.max_v ?? 0) + 1;
       const versionId = `ver_tpl_${crypto.randomBytes(6).toString('hex')}`;
       const nowIso = new Date().toISOString();
 
-      db.prepare(
+      await db.prepare(
         `INSERT INTO card_versions (id, card_id, version_number, status, provider, result_kind, result_url, suggested_name, keywords, latency_ms, started_at, finished_at, created_at)
          VALUES (?, ?, ?, 'succeeded', 'template', 'template', ?, ?, ?, 0, ?, ?, ?)`
       ).run(
@@ -1763,10 +1701,10 @@ router.post('/cards/:id/fallback', ensureSession, (req, res) => {
         nowIso
       );
 
-      db.prepare(`UPDATE cards SET active_version_id = ? WHERE id = ?`).run(versionId, cardId);
-      versionRecord = db.prepare(`SELECT * FROM card_versions WHERE id = ?`).get(versionId) as Record<string, unknown>;
+      await db.prepare(`UPDATE cards SET active_version_id = ? WHERE id = ?`).run(versionId, cardId);
+      versionRecord = await db.prepare(`SELECT * FROM card_versions WHERE id = ?`).get(versionId) as Record<string, unknown>;
 
-      recordRunLog({
+      await recordRunLog({
         id: `log_${crypto.randomBytes(6).toString('hex')}`,
         kind: 'image',
         provider: 'template',
@@ -1776,7 +1714,7 @@ router.post('/cards/:id/fallback', ensureSession, (req, res) => {
         detail: `card=${cardId} template=${template.id}`,
       });
     });
-    tx();
+    await tx();
   } catch (err: unknown) {
     const e = err as { status?: number; code?: string; message?: string };
     sendError(req, res, e.status || 400, e.code || 'INVALID_INPUT', e.message || '启用模板兜底失败');
@@ -1784,11 +1722,11 @@ router.post('/cards/:id/fallback', ensureSession, (req, res) => {
   }
 
   const payload = { data: formatCardVersion(versionRecord!) };
-  saveIdempotency(sessionId, `fallback:${cardId}`, idempotencyKey, requestHash, statusCode, payload);
+  await saveIdempotency(sessionId, `fallback:${cardId}`, idempotencyKey, requestHash, statusCode, payload);
   res.status(statusCode).json(payload);
 });
 
-router.post('/cards/:id/bind', ensureSession, (req, res) => {
+router.post('/cards/:id/bind', ensureSession, async (req, res) => {
   const cardId = req.params.id;
   const sessionId = req.session!.id;
   const versionId = typeof req.body?.versionId === 'string' ? req.body.versionId.trim() : '';
@@ -1805,7 +1743,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
   }
 
   const requestHash = hashObject({ cardId, versionId, dollName });
-  const idem = checkIdempotency(sessionId, `bind:${cardId}`, idempotencyKey, requestHash);
+  const idem = await checkIdempotency(sessionId, `bind:${cardId}`, idempotencyKey, requestHash);
   if (idem.hit) {
     if (idem.conflict) {
       sendError(req, res, 409, 'IDEMPOTENCY_CONFLICT', '相同幂等键提交了不同的绑定版本或娃娃名称');
@@ -1815,13 +1753,13 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
     return;
   }
 
-  const baseUrl = getLiveBaseUrl(req);
+  const baseUrl = await getLiveBaseUrl(req);
   let resultStatus = 201;
   let resultDollId = '';
 
   try {
-    const bindTx = db.transaction(() => {
-      const card = db
+    const bindTx = db.transaction(async () => {
+      const card = await db
         .prepare(
           `SELECT c.*, p.name AS persona_name, p.mbti AS persona_mbti
            FROM cards c
@@ -1834,7 +1772,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
         throw Object.assign(new Error('未找到对应的创作卡片'), { status: 404, code: 'NOT_FOUND' });
       }
 
-      const version = db
+      const version = await db
         .prepare(`SELECT * FROM card_versions WHERE id = ? AND card_id = ?`)
         .get(versionId, cardId) as Record<string, unknown> | undefined;
 
@@ -1853,7 +1791,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
       }
 
       if (card.bound_doll_id) {
-        const existingDoll = db
+        const existingDoll = await db
           .prepare(`SELECT id, card_version_id FROM dolls WHERE id = ?`)
           .get(card.bound_doll_id) as { id: string; card_version_id: string } | undefined;
 
@@ -1871,7 +1809,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
       const dollId = `doll_${crypto.randomBytes(6).toString('hex')}`;
       const nowIso = new Date().toISOString();
 
-      db.prepare(
+      await db.prepare(
         `INSERT INTO dolls (id, kind, owner_session_id, persona_id, name, avatar_url, card_id, card_version_id, created_at)
          VALUES (?, 'personal', ?, ?, ?, ?, ?, ?, ?)`
       ).run(
@@ -1885,7 +1823,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
         nowIso
       );
 
-      db.prepare(`UPDATE cards SET bound_doll_id = ?, active_version_id = ? WHERE id = ?`).run(
+      await db.prepare(`UPDATE cards SET bound_doll_id = ?, active_version_id = ? WHERE id = ?`).run(
         dollId,
         versionId,
         cardId
@@ -1896,7 +1834,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
          VALUES (?, ?, ?, ?, ?, 'creation_form', ?)`
       );
 
-      insertMem.run(
+      await insertMem.run(
         `mem_${crypto.randomBytes(6).toString('hex')}`,
         sessionId,
         dollId,
@@ -1904,7 +1842,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
         String(card.user_nickname),
         nowIso
       );
-      insertMem.run(
+      await insertMem.run(
         `mem_${crypto.randomBytes(6).toString('hex')}`,
         sessionId,
         dollId,
@@ -1912,7 +1850,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
         dollName,
         nowIso
       );
-      insertMem.run(
+      await insertMem.run(
         `mem_${crypto.randomBytes(6).toString('hex')}`,
         sessionId,
         dollId,
@@ -1921,9 +1859,9 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
         nowIso
       );
 
-      const accessoryLabels = resolveMaterialLabels(JSON.parse(String(card.accessory_ids || '[]')));
+      const accessoryLabels = await resolveMaterialLabels(JSON.parse(String(card.accessory_ids || '[]')));
       if (accessoryLabels.length > 0) {
-        insertMem.run(
+        await insertMem.run(
           `mem_${crypto.randomBytes(6).toString('hex')}`,
           sessionId,
           dollId,
@@ -1936,7 +1874,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
       resultDollId = dollId;
       resultStatus = 201;
     });
-    bindTx();
+    await bindTx();
   } catch (err: unknown) {
     const e = err as { status?: number; code?: string; message?: string };
     sendError(req, res, e.status || 400, e.code || 'INVALID_INPUT', e.message || '绑定失败');
@@ -1951,7 +1889,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
       cardVersionId: versionId,
     },
   };
-  saveIdempotency(sessionId, `bind:${cardId}`, idempotencyKey, requestHash, resultStatus, responsePayload);
+  await saveIdempotency(sessionId, `bind:${cardId}`, idempotencyKey, requestHash, resultStatus, responsePayload);
   res.status(resultStatus).json(responsePayload);
 });
 
@@ -1960,7 +1898,7 @@ router.post('/cards/:id/bind', ensureSession, (req, res) => {
 // ============================================================
 const ALLOWED_PAPER_SIZES = new Set(['A6', 'A5', 'SQUARE_100']);
 
-router.post('/plot/jobs', ensureSession, (req, res) => {
+router.post('/plot/jobs', ensureSession, async (req, res) => {
   const sessionId = req.session!.id;
   const cardVersionId = typeof req.body?.cardVersionId === 'string' ? req.body.cardVersionId.trim() : '';
   const paperSize = typeof req.body?.paperSize === 'string' ? req.body.paperSize.trim() : 'A6';
@@ -1977,78 +1915,57 @@ router.post('/plot/jobs', ensureSession, (req, res) => {
   }
 
   const requestHash = hashObject({ cardVersionId, paperSize, simulateFail });
-  const idem = checkIdempotency(sessionId, 'create_plot_job', idempotencyKey, requestHash);
-  if (idem.hit) {
-    if (idem.conflict) {
-      sendError(req, res, 409, 'IDEMPOTENCY_CONFLICT', '相同幂等键提交了不同的出图参数');
-      return;
+  const payload = await persistTask(sessionId, 'create_plot_job', idempotencyKey, requestHash, async () => {
+    const verRow = await db
+      .prepare(
+        `SELECT cv.id, cv.card_id, cv.status, cv.result_url
+         FROM card_versions cv
+         JOIN cards c ON c.id = cv.card_id
+         WHERE cv.id = ? AND c.owner_session_id = ?`
+      )
+      .get(cardVersionId, sessionId) as
+      | { id: string; card_id: string; status: string; result_url: string | null }
+      | undefined;
+
+    if (!verRow) {
+      throw Object.assign(new Error('未找到属于当前会话的生成版本'), { status: 404, code: 'NOT_FOUND' });
     }
-    res.status(idem.status).json(idem.body);
-    return;
-  }
+    if (verRow.status !== 'succeeded' || !verRow.result_url) {
+      throw Object.assign(new Error('仅支持对成功的生成版本提交模拟出图'), { status: 400, code: 'INVALID_CARD_VERSION' });
+    }
 
-  const verRow = db
-    .prepare(
-      `SELECT cv.id, cv.card_id, cv.status, cv.result_url
-       FROM card_versions cv
-       JOIN cards c ON c.id = cv.card_id
-       WHERE cv.id = ? AND c.owner_session_id = ?`
-    )
-    .get(cardVersionId, sessionId) as
-    | { id: string; card_id: string; status: string; result_url: string | null }
-    | undefined;
+    const jobId = `job_${crypto.randomBytes(8).toString('hex')}`;
+    const nowIso = new Date().toISOString();
 
-  if (!verRow) {
-    sendError(req, res, 404, 'NOT_FOUND', '未找到属于当前会话的生成版本');
-    return;
-  }
-  if (verRow.status !== 'succeeded' || !verRow.result_url) {
-    sendError(req, res, 400, 'INVALID_CARD_VERSION', '仅支持对已成功且结果图可访问的版本提交模拟出图');
-    return;
-  }
-
-  const jobId = `job_${crypto.randomBytes(8).toString('hex')}`;
-  const nowIso = new Date().toISOString();
-
-  db.prepare(
-    `INSERT INTO output_jobs (id, owner_session_id, card_id, card_version_id, paper_size, status, mode, physical_executed, idempotency_key, created_at)
-     VALUES (?, ?, ?, ?, ?, 'queued', 'mock', 0, ?, ?)`
-  ).run(jobId, sessionId, verRow.card_id, cardVersionId, paperSize, idempotencyKey ?? null, nowIso);
-
-  if (simulateFail) {
-    markJobSimulateFail(jobId);
-  }
-
-  const payload = {
-    data: {
-      jobId,
-      cardId: verRow.card_id,
-      cardVersionId,
-      paperSize,
-      status: 'queued',
-      mode: 'mock',
-      physicalExecuted: false,
-      createdAt: nowIso,
-    },
-  };
-  saveIdempotency(sessionId, 'create_plot_job', idempotencyKey, requestHash, 202, payload);
-  enqueueOutputJob(jobId);
+    await db.prepare(
+      `INSERT INTO output_jobs (id, owner_session_id, card_id, card_version_id, paper_size, status, mode,
+                                physical_executed, idempotency_key, created_at, simulate_fail)
+       VALUES (?, ?, ?, ?, ?, 'queued', 'mock', 0, ?, ?, ?)`
+    ).run(jobId, sessionId, verRow.card_id, cardVersionId, paperSize, idempotencyKey ?? null, nowIso, Number(simulateFail));
+    return { data: {
+      jobId, cardId: verRow.card_id, cardVersionId, paperSize, status: 'queued', mode: 'mock',
+      physicalExecuted: false, errorCode: null, errorMessage: null, finishedAt: null, createdAt: nowIso,
+    } };
+  });
+  await enqueueOutputJob(payload.data.jobId);
   res.status(202).json(payload);
 });
 
-router.get('/plot/jobs', ensureSession, (req, res) => {
+router.get('/plot/jobs', ensureSession, async (req, res) => {
   const sessionId = req.session!.id;
   const cardId = typeof req.query.cardId === 'string' ? req.query.cardId.trim() : '';
 
   const rows = cardId
-    ? (db
+    ? (await db
         .prepare(
           `SELECT * FROM output_jobs WHERE owner_session_id = ? AND card_id = ? ORDER BY created_at DESC`
         )
         .all(sessionId, cardId) as Array<Record<string, unknown>>)
-    : (db
+    : (await db
         .prepare(`SELECT * FROM output_jobs WHERE owner_session_id = ? ORDER BY created_at DESC LIMIT 30`)
         .all(sessionId) as Array<Record<string, unknown>>);
+
+  await Promise.all(rows.map((row) => recoverQueuedDelivery('output', row)));
 
   sendSuccess(
     res,
@@ -2068,11 +1985,11 @@ router.get('/plot/jobs', ensureSession, (req, res) => {
   );
 });
 
-router.get('/plot/jobs/:id', ensureSession, (req, res) => {
+router.get('/plot/jobs/:id', ensureSession, async (req, res) => {
   const jobId = req.params.id;
   const sessionId = req.session!.id;
 
-  const r = db
+  const r = await db
     .prepare(`SELECT * FROM output_jobs WHERE id = ? AND owner_session_id = ?`)
     .get(jobId, sessionId) as Record<string, unknown> | undefined;
 
@@ -2081,6 +1998,7 @@ router.get('/plot/jobs/:id', ensureSession, (req, res) => {
     return;
   }
 
+  await recoverQueuedDelivery('output', r);
   sendSuccess(res, {
     jobId: r.id,
     cardId: r.card_id,
@@ -2099,11 +2017,19 @@ router.get('/plot/jobs/:id', ensureSession, (req, res) => {
 // ============================================================
 // 9. Persistent Generated Asset Serving & Download
 // ============================================================
-router.get('/assets/generated/:filename', (req, res) => {
-  const safeName = path.basename(req.params.filename);
-  const absPath = path.join(config.storagePath, 'generated', safeName);
-
-  if (!fs.existsSync(absPath)) {
+router.get('/assets/generated/:filename', async (req, res) => {
+  const safeName = path.basename(String(req.params.filename));
+  const session = await loadExistingSession(req);
+  res.vary('Cookie');
+  res.setHeader('Cache-Control', 'private, no-store');
+  const visible = await db.prepare(`
+    SELECT 1 FROM card_versions v JOIN cards c ON c.id = v.card_id
+    LEFT JOIN dolls d ON d.id = c.bound_doll_id AND d.card_version_id = v.id
+    WHERE v.id = ? AND v.result_url = ? AND v.status = 'succeeded'
+      AND (c.owner_session_id = ? OR d.id IS NOT NULL)
+  `).get(path.parse(safeName).name, '/api/assets/generated/' + safeName, session?.id ?? null);
+  const media = visible ? await openMedia(`generated/${safeName}`) : null;
+  if (!media) {
     sendError(req, res, 404, 'NOT_FOUND', '未找到生成结果文件');
     return;
   }
@@ -2119,21 +2045,20 @@ router.get('/assets/generated/:filename', (req, res) => {
       : 'image/jpeg';
 
   res.setHeader('Content-Type', mime);
-  res.setHeader('Cache-Control', 'public, max-age=86400');
   if (req.query.download === '1') {
     res.setHeader('Content-Disposition', `attachment; filename="nutshell_${safeName}"`);
   }
-  fs.createReadStream(absPath).pipe(res);
+  await pipeline(media, res);
 });
 
 // ============================================================
 // 10. Protected Demo Admin Endpoints (/api/demo/*)
 // ============================================================
-router.get('/demo/status', requireAdmin, (req, res) => {
-  const settings = getRuntimeSettings();
+router.get('/demo/status', requireAdmin, async (req, res) => {
+  const settings = await getRuntimeSettings();
   const liveBaseUrl = buildPublicBaseUrl(req, settings.nfcPublicBaseUrl);
 
-  const versionStats = db
+  const versionStats = await db
     .prepare(
       `SELECT provider, result_kind, status, COUNT(*) AS cnt, AVG(latency_ms) AS avg_ms
        FROM card_versions
@@ -2141,7 +2066,7 @@ router.get('/demo/status', requireAdmin, (req, res) => {
     )
     .all();
 
-  const chatStats = db
+  const chatStats = await db
     .prepare(
       `SELECT provider, status, COUNT(*) AS cnt, AVG(first_token_ms) AS avg_ttft_ms, AVG(total_ms) AS avg_total_ms
        FROM messages
@@ -2150,7 +2075,7 @@ router.get('/demo/status', requireAdmin, (req, res) => {
     )
     .all();
 
-  const outputStats = db
+  const outputStats = await db
     .prepare(
       `SELECT mode, status, COUNT(*) AS cnt, SUM(physical_executed) AS physical_count
        FROM output_jobs
@@ -2158,7 +2083,7 @@ router.get('/demo/status', requireAdmin, (req, res) => {
     )
     .all();
 
-  const recentErrors = db
+  const recentErrors = await db
     .prepare(
       `SELECT id, kind, provider, result_kind, error_code, detail, request_id, created_at
        FROM run_logs
@@ -2168,7 +2093,7 @@ router.get('/demo/status', requireAdmin, (req, res) => {
     )
     .all();
 
-  const recentRuns = db
+  const recentRuns = await db
     .prepare(
       `SELECT id, kind, provider, result_kind, status, first_token_ms, total_ms, error_code, detail, created_at
        FROM run_logs
@@ -2177,7 +2102,7 @@ router.get('/demo/status', requireAdmin, (req, res) => {
     )
     .all();
 
-  const activeSessions = db
+  const activeSessions = await db
     .prepare(
       `SELECT s.id, s.is_demo, s.created_at, s.expires_at,
               (SELECT COUNT(*) FROM cards c WHERE c.owner_session_id = s.id) AS card_count,
@@ -2192,7 +2117,7 @@ router.get('/demo/status', requireAdmin, (req, res) => {
     )
     .all();
 
-  const nfcTagRows = db
+  const nfcTagRows = await db
     .prepare(
       `SELECT nt.alias, nt.doll_id, nt.label, nt.last_written_at, nt.created_at,
               d.name AS doll_name, d.kind AS doll_kind, p.mbti AS persona_mbti, p.name AS persona_name
@@ -2203,7 +2128,7 @@ router.get('/demo/status', requireAdmin, (req, res) => {
     )
     .all() as Array<Record<string, unknown>>;
 
-  const allDolls = db
+  const allDolls = await db
     .prepare(
       `SELECT d.id, d.name, d.kind, p.mbti AS persona_mbti, p.name AS persona_name
        FROM dolls d
@@ -2213,14 +2138,17 @@ router.get('/demo/status', requireAdmin, (req, res) => {
     )
     .all() as Array<Record<string, unknown>>;
 
-  const allMaterials = listMaterials(false);
+  const allMaterials = await listMaterials(false);
 
   sendSuccess(res, {
     settings: {
       ...settings,
       effectiveBaseUrl: liveBaseUrl,
       imageModelTierLabel: IMAGE_TIER_LABELS[settings.imageModelTier],
-      availableImageModels: IMAGE_MODEL_BY_TIER,
+      availableImageModels: IMAGE_MODELS[settings.imageVendor],
+      nfcWriteScope: nfcWriteScope(settings.nfcPublicBaseUrl),
+      nfcBaseUrlEditable: !config.isVercel && !config.publicAppUrl,
+      imageGenerationEnabled: config.imageGenerationEnabled,
     },
     providers: {
       chat: {
@@ -2238,9 +2166,9 @@ router.get('/demo/status', requireAdmin, (req, res) => {
         model: settings.imageModel,
         tier: settings.imageModelTier,
         tierLabel: IMAGE_TIER_LABELS[settings.imageModelTier],
-        configured: settings.imageProviderMode === 'mock' ? true : isImageCloudConfigured(),
-        cloudKeyAvailable: isImageCloudConfigured(),
-        viaOpenAICompatible: Boolean(config.imageApiBase),
+        configured: settings.imageProviderMode === 'mock' || isImageCloudConfigured(settings.imageVendor),
+        cloudKeyAvailable: isImageCloudConfigured(settings.imageVendor),
+        viaOpenAICompatible: settings.imageVendor === 'openai',
         timeoutMs: config.imageTimeoutMs,
         performanceTargetMs: 40000,
         maxRegenerations: config.maxRegenerations,
@@ -2252,10 +2180,10 @@ router.get('/demo/status', requireAdmin, (req, res) => {
       },
     },
     counts: {
-      demoDolls: (db.prepare(`SELECT COUNT(*) AS c FROM dolls WHERE kind = 'demo'`).get() as { c: number }).c,
-      personalDolls: (db.prepare(`SELECT COUNT(*) AS c FROM dolls WHERE kind = 'personal'`).get() as { c: number }).c,
-      cards: (db.prepare(`SELECT COUNT(*) AS c FROM cards`).get() as { c: number }).c,
-      personas: (db.prepare(`SELECT COUNT(*) AS c FROM personas`).get() as { c: number }).c,
+      demoDolls: (await db.prepare(`SELECT COUNT(*) AS c FROM dolls WHERE kind = 'demo'`).get() as { c: number }).c,
+      personalDolls: (await db.prepare(`SELECT COUNT(*) AS c FROM dolls WHERE kind = 'personal'`).get() as { c: number }).c,
+      cards: (await db.prepare(`SELECT COUNT(*) AS c FROM cards`).get() as { c: number }).c,
+      personas: (await db.prepare(`SELECT COUNT(*) AS c FROM personas`).get() as { c: number }).c,
       materialsTotal: allMaterials.length,
       materialsInStock: allMaterials.filter((m) => m.inStock).length,
     },
@@ -2268,7 +2196,7 @@ router.get('/demo/status', requireAdmin, (req, res) => {
       personaMbti: t.persona_mbti ? String(t.persona_mbti) : '',
       personaName: t.persona_name ? String(t.persona_name) : '',
       nfcUrl: `${liveBaseUrl}/nfc/${t.alias}`,
-      directUrl: `${liveBaseUrl}/d/${t.doll_id}?entry=nfc`,
+      directUrl: `${liveBaseUrl}/d/${t.doll_id}/chat?entry=nfc`,
       lastWrittenAt: t.last_written_at ? String(t.last_written_at) : null,
       createdAt: String(t.created_at),
     })),
@@ -2278,7 +2206,7 @@ router.get('/demo/status', requireAdmin, (req, res) => {
       kind: String(d.kind),
       personaMbti: String(d.persona_mbti),
       personaName: String(d.persona_name),
-      directUrl: `${liveBaseUrl}/d/${d.id}?entry=nfc`,
+      directUrl: `${liveBaseUrl}/d/${d.id}/chat?entry=nfc`,
     })),
     metrics: {
       chat: chatStats,
@@ -2291,7 +2219,7 @@ router.get('/demo/status', requireAdmin, (req, res) => {
   });
 });
 
-router.patch('/demo/settings', requireAdmin, (req, res) => {
+router.patch('/demo/settings', requireAdmin, async (req, res) => {
   const body = req.body ?? {};
 
   if (typeof body.nfcPublicBaseUrl === 'string') {
@@ -2300,7 +2228,7 @@ router.patch('/demo/settings', requireAdmin, (req, res) => {
       sendError(req, res, 400, 'INVALID_INPUT', '工位访问地址须以 http:// 或 https:// 开头，或留空使用默认地址');
       return;
     }
-    setRuntimeSetting('nfc_public_base_url', validated);
+    await setRuntimeSetting('nfc_public_base_url', validated);
   }
 
   if (body.imageModelTier !== undefined) {
@@ -2309,7 +2237,7 @@ router.patch('/demo/settings', requireAdmin, (req, res) => {
       sendError(req, res, 400, 'INVALID_INPUT', 'imageModelTier 仅支持 fast 或 hd');
       return;
     }
-    setRuntimeSetting('image_model_tier', tier);
+    await setRuntimeSetting('image_model_tier', tier);
   }
 
   if (body.chatProviderMode !== undefined) {
@@ -2318,7 +2246,15 @@ router.patch('/demo/settings', requireAdmin, (req, res) => {
       sendError(req, res, 400, 'INVALID_INPUT', 'chatProviderMode 仅支持 cloud 或 mock');
       return;
     }
-    setRuntimeSetting('chat_provider_mode', mode);
+    await setRuntimeSetting('chat_provider_mode', mode);
+  }
+
+  if (body.imageVendor !== undefined) {
+    if (body.imageVendor !== 'openai' && body.imageVendor !== 'gemini') {
+      sendError(req, res, 400, 'INVALID_INPUT', 'imageVendor 仅支持 openai 或 gemini');
+      return;
+    }
+    await setRuntimeSetting('image_vendor', body.imageVendor);
   }
 
   if (body.imageProviderMode !== undefined) {
@@ -2327,15 +2263,15 @@ router.patch('/demo/settings', requireAdmin, (req, res) => {
       sendError(req, res, 400, 'INVALID_INPUT', 'imageProviderMode 仅支持 cloud 或 mock');
       return;
     }
-    setRuntimeSetting('image_provider_mode', mode);
+    await setRuntimeSetting('image_provider_mode', mode);
   }
 
   if (typeof body.strictMaterialConstraint === 'boolean') {
-    setRuntimeSetting('strict_material_constraint', body.strictMaterialConstraint ? 'true' : 'false');
+    await setRuntimeSetting('strict_material_constraint', body.strictMaterialConstraint ? 'true' : 'false');
   }
 
-  const updated = getRuntimeSettings();
-  recordRunLog({
+  const updated = await getRuntimeSettings();
+  await recordRunLog({
     id: `log_${crypto.randomBytes(6).toString('hex')}`,
     kind: 'system',
     provider: 'admin',
@@ -2346,12 +2282,15 @@ router.patch('/demo/settings', requireAdmin, (req, res) => {
   sendSuccess(res, {
     ...updated,
     effectiveBaseUrl: buildPublicBaseUrl(req, updated.nfcPublicBaseUrl),
+    nfcWriteScope: nfcWriteScope(updated.nfcPublicBaseUrl),
+    nfcBaseUrlEditable: !config.isVercel && !config.publicAppUrl,
+    imageGenerationEnabled: config.imageGenerationEnabled,
     imageModelTierLabel: IMAGE_TIER_LABELS[updated.imageModelTier],
   });
 });
 
 // ---- Admin NFC Tag Management ----
-router.post('/demo/nfc-tags', requireAdmin, (req, res) => {
+router.post('/demo/nfc-tags', requireAdmin, async (req, res) => {
   const alias = typeof req.body?.alias === 'string' ? req.body.alias.trim().toLowerCase() : '';
   const dollId = typeof req.body?.dollId === 'string' ? req.body.dollId.trim() : '';
   const label = typeof req.body?.label === 'string' ? req.body.label.trim() : '';
@@ -2360,7 +2299,7 @@ router.post('/demo/nfc-tags', requireAdmin, (req, res) => {
     sendError(req, res, 400, 'INVALID_INPUT', '标签短码需为 2–32 位小写字母、数字、连字符或下划线');
     return;
   }
-  const doll = db.prepare(`SELECT id, name FROM dolls WHERE id = ?`).get(dollId) as
+  const doll = await db.prepare(`SELECT id, name FROM dolls WHERE id = ?`).get(dollId) as
     | { id: string; name: string }
     | undefined;
   if (!doll) {
@@ -2370,13 +2309,14 @@ router.post('/demo/nfc-tags', requireAdmin, (req, res) => {
 
   const finalLabel = (label || `${doll.name} · NFC 展位签`).slice(0, 60);
   const now = new Date().toISOString();
-  db.prepare(
+  await db.prepare(
     `INSERT INTO nfc_tags (alias, doll_id, label, created_at)
      VALUES (?, ?, ?, ?)
-     ON CONFLICT(alias) DO UPDATE SET doll_id = excluded.doll_id, label = excluded.label`
+     ON CONFLICT(alias) DO UPDATE SET doll_id = excluded.doll_id, label = excluded.label,
+       last_written_at = CASE WHEN nfc_tags.doll_id = excluded.doll_id THEN nfc_tags.last_written_at ELSE NULL END`
   ).run(alias, dollId, finalLabel, now);
 
-  const baseUrl = getLiveBaseUrl(req);
+  const baseUrl = await getLiveBaseUrl(req);
   sendSuccess(
     res,
     {
@@ -2389,10 +2329,17 @@ router.post('/demo/nfc-tags', requireAdmin, (req, res) => {
   );
 });
 
-router.post('/demo/nfc-tags/:alias/written', requireAdmin, (req, res) => {
-  const alias = (req.params.alias || '').trim().toLowerCase();
+router.post('/demo/nfc-tags/:alias/written', requireAdmin, async (req, res) => {
+  const alias = String(req.params.alias).trim().toLowerCase();
+  const settings = await getRuntimeSettings();
+  const scope = nfcWriteScope(settings.nfcPublicBaseUrl);
+  const expectedUrl = `${buildPublicBaseUrl(req, settings.nfcPublicBaseUrl)}/nfc/${alias}`;
+  if (scope === 'unavailable' || req.body?.scope !== scope || req.body?.url !== expectedUrl) {
+    sendError(req, res, 409, 'NFC_RECORD_MISMATCH', '读回的 URL 必须与当前环境下该标签的完整 HTTPS 地址一致');
+    return;
+  }
   const now = new Date().toISOString();
-  const upd = db
+  const upd = await db
     .prepare(`UPDATE nfc_tags SET last_written_at = ? WHERE LOWER(alias) = ?`)
     .run(now, alias);
 
@@ -2404,14 +2351,14 @@ router.post('/demo/nfc-tags/:alias/written', requireAdmin, (req, res) => {
 });
 
 // ---- Admin Real Craft Materials Inventory CRUD + JSON Import ----
-router.get('/demo/materials', requireAdmin, (_req, res) => {
+router.get('/demo/materials', requireAdmin, async (_req, res) => {
   sendSuccess(res, {
     categories: MATERIAL_CATEGORY_LABELS,
-    items: listMaterials(false),
+    items: await listMaterials(false),
   });
 });
 
-router.post('/demo/materials', requireAdmin, (req, res) => {
+router.post('/demo/materials', requireAdmin, async (req, res) => {
   const body = req.body ?? {};
   const rawId = typeof body.id === 'string' && body.id.trim()
     ? body.id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_')
@@ -2439,7 +2386,7 @@ router.post('/demo/materials', requireAdmin, (req, res) => {
   const finalVisualHint = (visualHint || `handmade ${material} craft accessory (${label})`).slice(0, 260);
   const now = new Date().toISOString();
 
-  db.prepare(
+  await db.prepare(
     `INSERT INTO materials (id, label, category, material, visual_hint, in_stock, sort_order, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
@@ -2467,9 +2414,9 @@ router.post('/demo/materials', requireAdmin, (req, res) => {
   );
 });
 
-router.patch('/demo/materials/:id', requireAdmin, (req, res) => {
+router.patch('/demo/materials/:id', requireAdmin, async (req, res) => {
   const matId = req.params.id;
-  const existing = db.prepare(`SELECT * FROM materials WHERE id = ?`).get(matId) as Record<string, unknown> | undefined;
+  const existing = await db.prepare(`SELECT * FROM materials WHERE id = ?`).get(matId) as Record<string, unknown> | undefined;
   if (!existing) {
     sendError(req, res, 404, 'NOT_FOUND', '未找到对应的材料条目');
     return;
@@ -2485,7 +2432,7 @@ router.patch('/demo/materials/:id', requireAdmin, (req, res) => {
   const inStock = typeof body.inStock === 'boolean' ? (body.inStock ? 1 : 0) : Number(existing.in_stock);
   const now = new Date().toISOString();
 
-  db.prepare(
+  await db.prepare(
     `UPDATE materials
      SET label = ?, category = ?, material = ?, visual_hint = ?, in_stock = ?, updated_at = ?
      WHERE id = ?`
@@ -2501,9 +2448,9 @@ router.patch('/demo/materials/:id', requireAdmin, (req, res) => {
   });
 });
 
-router.delete('/demo/materials/:id', requireAdmin, (req, res) => {
+router.delete('/demo/materials/:id', requireAdmin, async (req, res) => {
   const matId = req.params.id;
-  const del = db.prepare(`DELETE FROM materials WHERE id = ?`).run(matId);
+  const del = await db.prepare(`DELETE FROM materials WHERE id = ?`).run(matId);
   if (del.changes === 0) {
     sendError(req, res, 404, 'NOT_FOUND', '未找到要删除的材料');
     return;
@@ -2511,7 +2458,7 @@ router.delete('/demo/materials/:id', requireAdmin, (req, res) => {
   res.status(204).end();
 });
 
-router.post('/demo/materials/import', requireAdmin, (req, res) => {
+router.post('/demo/materials/import', requireAdmin, async (req, res) => {
   const mode = req.body?.mode === 'replace' ? 'replace' : 'merge';
   const rawItems = Array.isArray(req.body?.items) ? req.body.items : null;
 
@@ -2567,9 +2514,9 @@ router.post('/demo/materials/import', requireAdmin, (req, res) => {
   }
 
   const now = new Date().toISOString();
-  const tx = db.transaction(() => {
+  const tx = db.transaction(async () => {
     if (mode === 'replace') {
-      db.prepare(`DELETE FROM materials`).run();
+      await db.prepare(`DELETE FROM materials`).run();
     }
     const upsert = db.prepare(
       `INSERT INTO materials (id, label, category, material, visual_hint, in_stock, sort_order, created_at, updated_at)
@@ -2584,30 +2531,30 @@ router.post('/demo/materials/import', requireAdmin, (req, res) => {
          updated_at = excluded.updated_at`
     );
     for (const row of normalized) {
-      upsert.run({ ...row, now });
+      await upsert.run({ ...row, now });
     }
   });
-  tx();
+  await tx();
 
   sendSuccess(res, {
     mode,
     importedCount: normalized.length,
-    totalCount: listMaterials(false).length,
+    totalCount: (await listMaterials(false)).length,
   });
 });
 
-router.post('/demo/reset', requireAdmin, (req, res) => {
+router.post('/demo/reset', requireAdmin, async (req, res) => {
   const targetSessionId =
     typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
       ? req.body.sessionId.trim()
-      : loadExistingSession(req)?.id || '';
+      : (await loadExistingSession(req))?.id || '';
 
   if (!targetSessionId) {
     sendError(req, res, 400, 'INVALID_INPUT', '请提供要重置的演示 sessionId');
     return;
   }
 
-  const sessionRow = db
+  const sessionRow = await db
     .prepare(`SELECT id, is_demo, invalidated FROM sessions WHERE id = ?`)
     .get(targetSessionId) as { id: string; is_demo: number; invalidated: number } | undefined;
 
@@ -2620,7 +2567,7 @@ router.post('/demo/reset', requireAdmin, (req, res) => {
     return;
   }
 
-  const runningVer = db
+  const runningVer = await db
     .prepare(
       `SELECT cv.id
        FROM card_versions cv
@@ -2630,11 +2577,14 @@ router.post('/demo/reset', requireAdmin, (req, res) => {
     )
     .get(targetSessionId);
 
-  const runningJob = db
+  const runningJob = await db
     .prepare(`SELECT id FROM output_jobs WHERE owner_session_id = ? AND status = 'running' LIMIT 1`)
     .get(targetSessionId);
 
-  const runningChat = Array.from(inFlightChats).some((k) => k.startsWith(`${targetSessionId}:`));
+  const runningChat = await db.prepare(
+    `SELECT 1 FROM messages WHERE session_id = ? AND role = 'assistant'
+       AND status IN ('pending', 'streaming') AND created_at > ? LIMIT 1`
+  ).get(targetSessionId, new Date(Date.now() - 75_000).toISOString());
 
   if (runningVer || runningJob || runningChat) {
     sendError(
@@ -2647,47 +2597,43 @@ router.post('/demo/reset', requireAdmin, (req, res) => {
     return;
   }
 
-  const filesToDelete: string[] = [];
-  const cards = db
+  const filesToDelete: MediaKey[] = [];
+  const cards = await db
     .prepare(`SELECT id, photo_ref FROM cards WHERE owner_session_id = ?`)
     .all(targetSessionId) as Array<{ id: string; photo_ref: string }>;
 
   for (const c of cards) {
-    filesToDelete.push(path.join(config.storagePath, 'photos', c.photo_ref));
-    const vers = db
+    filesToDelete.push(`photos/${c.photo_ref}`);
+    const vers = await db
       .prepare(`SELECT result_url, result_kind FROM card_versions WHERE card_id = ?`)
       .all(c.id) as Array<{ result_url: string | null; result_kind: string }>;
     for (const v of vers) {
       if (v.result_url && v.result_url.startsWith('/api/assets/generated/')) {
         const fname = path.basename(v.result_url);
-        filesToDelete.push(path.join(config.storagePath, 'generated', fname));
+        filesToDelete.push(`generated/${fname}`);
       }
     }
   }
 
-  const resetTx = db.transaction(() => {
-    db.prepare(`DELETE FROM messages WHERE session_id = ?`).run(targetSessionId);
-    db.prepare(`DELETE FROM memories WHERE session_id = ?`).run(targetSessionId);
-    db.prepare(`DELETE FROM output_jobs WHERE owner_session_id = ?`).run(targetSessionId);
-    db.prepare(`DELETE FROM dolls WHERE kind = 'personal' AND owner_session_id = ?`).run(targetSessionId);
-    db.prepare(`DELETE FROM cards WHERE owner_session_id = ?`).run(targetSessionId);
-    db.prepare(`DELETE FROM idempotency_keys WHERE session_id = ?`).run(targetSessionId);
-    db.prepare(`DELETE FROM session_claim_codes WHERE session_id = ?`).run(targetSessionId);
-    db.prepare(`UPDATE sessions SET invalidated = 1 WHERE id = ?`).run(targetSessionId);
+  const resetTx = db.transaction(async () => {
+    await db.prepare(`DELETE FROM messages WHERE session_id = ?`).run(targetSessionId);
+    await db.prepare(`DELETE FROM memories WHERE session_id = ?`).run(targetSessionId);
+    await db.prepare(`DELETE FROM output_jobs WHERE owner_session_id = ?`).run(targetSessionId);
+    await db.prepare(`DELETE FROM dolls WHERE kind = 'personal' AND owner_session_id = ?`).run(targetSessionId);
+    await db.prepare(`DELETE FROM cards WHERE owner_session_id = ?`).run(targetSessionId);
+    await db.prepare(`DELETE FROM idempotency_keys WHERE session_id = ?`).run(targetSessionId);
+    await db.prepare(`DELETE FROM session_claim_codes WHERE session_id = ?`).run(targetSessionId);
+    await db.prepare(`UPDATE sessions SET invalidated = 1 WHERE id = ?`).run(targetSessionId);
   });
-  resetTx();
+  await resetTx();
 
-  for (const fp of filesToDelete) {
-    if (fs.existsSync(fp)) {
-      try {
-        fs.unlinkSync(fp);
-      } catch {
-        // Best-effort file removal
-      }
-    }
+  for (const key of filesToDelete) {
+    await deleteMedia(key).catch((error) => {
+      console.error('[media] reset cleanup failed', key, (error as { code?: string }).code);
+    });
   }
 
-  const callerSession = loadExistingSession(req);
+  const callerSession = await loadExistingSession(req);
   if (callerSession?.id === targetSessionId) {
     clearSessionCookie(req, res);
   }

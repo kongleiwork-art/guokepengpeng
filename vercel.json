@@ -1,0 +1,40 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "regions": [
+    "hnd1"
+  ],
+  "functions": {
+    "api/index.ts": {
+      "maxDuration": 60
+    },
+    "api/task-worker.ts": {
+      "maxDuration": 120,
+      "includeFiles": "src/assets/images/**",
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "nutshell-tasks",
+          "retryAfterSeconds": 30
+        }
+      ]
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/nfc/:alias",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/((?!api/|nfc/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

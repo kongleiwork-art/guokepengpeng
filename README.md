@@ -2,68 +2,43 @@
 
 结合天然果实手作娃娃与 AI 角色的参赛演示用全栈网页应用。支持固定链接即聊（对应 NFC 入口能力）、明确记忆读写与删除、照片/摄像头采集、异步形象生成与版本保留、个人娃娃绑定、模拟出图任务及受保护的演示会话重置。
 
-## 技术栈选择
+## 本地运行
 
-- **前端**：React 19 + TypeScript + Vite 8 + Tailwind CSS v4 + React Router 7 + Lucide Icons
-- **后端**：Express 4 + TypeScript（`server.ts` 统一承载业务 API、静态资源与 Vite SPA）
-- **持久化**：SQLite（`better-sqlite3`，WAL 模式，外键约束与原子事务）+ 本地磁盘文件存储（`./storage/photos`、`./storage/generated`）
-- **AI 与二维码**：`@google/genai` 官方服务端 SDK（亦兼容 OpenAI 协议的 `CHAT_API_BASE` / `IMAGE_API_BASE`）+ `qrcode` 服务端 SVG 二维码生成
-
-> 部署提示：使用本地 SQLite 数据库（`DATABASE_URL`）与文件存储（`STORAGE_PATH`）时，生产环境需挂载持久磁盘以保留数据与生成成品图。
-
----
-
-## 快速启动
-
-### 1. 安装依赖
+使用 Node.js 24 和 npm。服务会建立 SQLite 表并初始化 16 种人格、4 个展示娃娃和工坊材料。
 
 ```bash
-npm install
-```
-
-### 2. 配置环境变量
-
-复制 `.env.example` 为 `.env`，按需配置模型凭据与运行模式：
-
-```bash
+npm ci
 cp .env.example .env
-```
-
-关键开关说明（详见 `.env.example`）：
-
-| 变量 | 说明 | 默认值 |
-| --- | --- | --- |
-| `APP_BASE_URL` | 生成 `dollUrl` 与 `cardUrl` 的基准地址 | `http://localhost:3000` |
-| `DATABASE_URL` | SQLite 数据库文件路径 | `./data/nutshell.sqlite` |
-| `STORAGE_PATH` | 原始照片与生成成品图存储目录 | `./storage` |
-| `SESSION_SECRET` | HttpOnly 匿名会话 Cookie 签名密钥 | 内置演示默认值（生产务必替换） |
-| `SESSION_TTL_DAYS` | 匿名会话有效期（天） | `30` |
-| `CHAT_PROVIDER` | `cloud` 或 `mock`；留空时检测到有效 Key 自动用 `cloud`，显式 `cloud` 缺 Key 返回 `PROVIDER_NOT_CONFIGURED` | 自动检测 |
-| `CHAT_MODEL` | 对话模型名称 | `gemini-4-hydrogen` |
-| `CHAT_API_BASE` / `CHAT_API_KEY` | 可选：OpenAI 兼容对话接口地址与密钥（留空则用 `@google/genai` + `GEMINI_API_KEY`） | 空 |
-| `IMAGE_PROVIDER` | `cloud` 或 `mock`；显式 `cloud` 缺 Key 返回 `PROVIDER_NOT_CONFIGURED`，不静默回退 | 缺 Key 时为 `mock` |
-| `IMAGE_MODEL` | 生图模型名称 | `gemini-3.1-flash-lite-image` |
-| `IMAGE_API_BASE` / `IMAGE_API_KEY` | 可选：OpenAI 兼容生图接口或独立生图密钥 | 空 |
-| `IMAGE_TIMEOUT_MS` | 生图硬超时（毫秒；性能目标 40000ms 单独记录） | `60000` |
-| `CHAT_FIRST_TOKEN_TIMEOUT_MS` | 对话首 token 硬超时（毫秒；性能目标 3000ms 单独记录） | `10000` |
-| `MAX_REGENERATIONS` | 初次生成后最多重生成次数（默认 2，即单卡片最多 3 次模型尝试） | `2` |
-| `OUTPUT_PROVIDER` | 本版固定 `mock` | `mock` |
-| `DEMO_ADMIN_TOKEN` | `/dev` 及管理接口授权令牌 | `demo-admin-2026` |
-| `PHOTO_TTL_HOURS` | 原始上传照片保留时间（小时），到期自动清理且保留已生成图 | `24` |
-
-### 3. 启动开发服务（端口 3000）
-
-```bash
 npm run dev
 ```
 
-启动时自动完成：
-1. SQLite 建表、索引与唯一约束初始化；
-2. 写入 **16 种 MBTI 人格**（含 4 个重点验证风格）与 **4 个只读预置展示娃娃**（`demo-acorn`、`demo-chestnut`、`demo-walnut`、`demo-hazelnut`）；
-3. 重启任务恢复：将未知状态的 `running` 任务标记为 `failed`（`errorCode=WORKER_RESTARTED`），避免重复计费；重新入队 `queued` 任务；
-4. 启动原始照片定时清理（`PHOTO_TTL_HOURS`）。
+本地数据默认在 `data/nutshell.sqlite`，媒体文件在 `storage`。可以设置 `CHAT_PROVIDER=mock` 和 `IMAGE_PROVIDER=mock` 运行离线演示。
 
-### 4. 构建与生产运行
+## Vercel 预览部署
+
+Vite 构建前端。Express API 和 NFC 跳转运行在 Vercel Functions。预览连接独立 Turso Starter 数据库与私有 Vercel Blob，后台任务使用 Vercel Queues。首次初始化只导入演示内容。
+
+| 预览环境变量 | 用途 |
+| --- | --- |
+| `TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN` | 独立预览数据库，由 Turso 集成提供 |
+| `BLOB_READ_WRITE_TOKEN` | 私有 Blob 读写，由 Vercel Storage 集成提供 |
+| `SESSION_SECRET` | 会话与队列消息的签名密钥，预览内固定以支持跨部署恢复 |
+| `DEMO_ADMIN_TOKEN` | `/dev` 工坊管理密钥 |
+| `STEPFUN_API_KEY`、`STEPFUN_CHAT_MODEL` | 阶跃星辰流式对话、四题快测和自适应访谈 |
+| `PREVIEW_APP_URL` | 固定 HTTPS 预览地址，用于测试贴纸和角色分享链接 |
+
+通过 `/api/health` 检查后端就绪情况。公开预览的 `/create` 显示「照片定制 · 待开放」。后端在解析照片前关闭上传和重生成。
+
+开放定制的环境使用 `OPENAI_API_KEY` 配置 GPT Image。工坊人员可在 `/dev` 手动切换至 Nano Banana，凭据使用 `GEMINI_API_KEY`。任务保存提交时的模型与质量档位。远程结果未知时，核对服务商的结果与费用后方可继续提交。原始照片保留 24 小时，已生成的作品按作品权限读取。
+
+### NFC 写签和检查
+
+- 测试贴纸使用固定预览地址下的 `/nfc/acorn`、`/nfc/chestnut`、`/nfc/walnut` 或 `/nfc/hazelnut`。每张贴纸只写一条 HTTPS URL/URI 记录。
+- iPhone 写签使用 NFC Tools。写完从同一张贴纸读回地址，到 `/dev` 对应行核对。Android Chrome 支持在该行直接写入和读回。
+- 兼容机型亮屏时，用 iPhone 顶部靠近标签并点击系统通知。HTTP 短链接直接跳转到娃娃聊天。正式域名接入后，通过 `PUBLIC_APP_URL` 指定正式写签域名。
+
+
+### 构建与生产运行
 
 ```bash
 npm run build
@@ -94,7 +69,7 @@ NODE_ENV=production npm start
    - 在 `/card/{cardId}` 选择纸张规格（`A6` / `A5` / `SQUARE_100`）点击 **提交模拟出图**；
    - 任务推进 `queued -> running -> succeeded`，返回 `mode=mock`、`physicalExecuted=false`。
 6. **下一轮演示重置**：
-   - 打开 `/dev`，输入 `DEMO_ADMIN_TOKEN`（默认 `demo-admin-2026`）；
+   - 打开 `/dev`，输入 `DEMO_ADMIN_TOKEN`；
    - 查看 Provider 配置、分模式性能指标与运行记录，点击对应会话的 **重置此会话** 清理当前演示数据；预置娃娃、人格配置与其他会话不受影响。
 
 ---
@@ -113,6 +88,6 @@ NODE_ENV=production npm start
 
 接口文档详见 [`docs/API.md`](docs/API.md)，代码预留位置在 `server/providers/rdkAdapter.ts`：
 
-- **NFC 碰一碰**：实体 NFC 标签写入 NDEF URI 记录，指向固定链接 `${APP_BASE_URL}/d/{dollId}`，浏览器直接打开即可完成续聊。
+- **NFC 碰一碰**使用一条 HTTPS NDEF URI 记录。打开 /nfc/{alias} 会跳转到娃娃聊天页。
 - **RDK 本地生图**：实现 `ImageProvider` 契约（`server/providers/imageProvider.ts` 中的 `ImageGenerateInput -> ImageGenerateResult`），在 `RdkImageProvider` 调用板端 HTTP 推理服务并落盘到 `STORAGE_PATH/generated`。
 - **机械臂 / 实体打印机**：实现 `OutputProvider` 契约（`server/providers/outputProvider.ts`），接收已锁定的 `cardVersionId`、`resultUrl`、`paperSize`，在适配器内执行位图转 SVG/路径与硬件调度，完成后返回 `mode: 'arm' | 'printer'` 与 `physicalExecuted: true`。

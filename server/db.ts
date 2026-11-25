@@ -1,9 +1,7 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import Database from 'better-sqlite3';
 import {
   config,
-  IMAGE_MODEL_BY_TIER,
+  IMAGE_MODELS,
+  type ImageVendor,
   type ImageModelTier,
   type ProviderMode,
 } from './config.ts';
@@ -14,15 +12,8 @@ import {
   type MaterialCategory,
 } from './data/seed.ts';
 
-// Ensure data & storage directories exist
-fs.mkdirSync(path.dirname(config.databaseUrl), { recursive: true });
-fs.mkdirSync(path.join(config.storagePath, 'photos'), { recursive: true });
-fs.mkdirSync(path.join(config.storagePath, 'generated'), { recursive: true });
-fs.mkdirSync(path.join(config.storagePath, 'output'), { recursive: true });
-
-export const db = new Database(config.databaseUrl);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+import { db } from './databaseClient.ts';
+export { db };
 
 export interface MaterialRecord {
   id: string;
@@ -38,6 +29,7 @@ export interface MaterialRecord {
 
 export interface RuntimeSettings {
   nfcPublicBaseUrl: string;
+  imageVendor: ImageVendor;
   imageModelTier: ImageModelTier;
   imageModel: string;
   chatProviderMode: ProviderMode;
@@ -45,15 +37,49 @@ export interface RuntimeSettings {
   strictMaterialConstraint: boolean;
 }
 
-function ensureColumnExists(table: string, column: string, definition: string): void {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+async function ensureColumnExists(table: string, column: string, definition: string): Promise<void> {
+  const cols = await db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (!cols.some((c) => c.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    await db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
 
-export function initDatabase(): { recoveredRunningVersions: number; recoveredRunningJobs: number } {
-  db.exec(`
+let initialization: ReturnType<typeof initialize> | undefined;
+
+export function initDatabase() {
+  initialization ??= initialize().catch((error) => {
+    initialization = undefined;
+    throw error;
+  });
+  return initialization;
+}
+
+async function initialize(): Promise<{ recoveredRunningVersions: number; recoveredRunningJobs: number }> {
+  if (config.isVercel && !config.sessionSecret) throw new Error('SESSION_SECRET 未配置');
+  const schemaVersion = async () => (await db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+  const migrate = db.transaction(async () => {
+    if (await schemaVersion() >= 1) return;
+    await migrateAndSeed();
+    await db.exec('PRAGMA user_version = 1');
+  });
+  if (await schemaVersion() < 1) await migrate();
+  if (config.isVercel) return { recoveredRunningVersions: 0, recoveredRunningJobs: 0 };
+
+  const now = new Date().toISOString();
+  if (!config.sessionSecret) {
+    const row = await db.prepare("SELECT value FROM app_settings WHERE key = 'session_secret'").get() as { value: string } | undefined;
+    config.sessionSecret = row?.value || '';
+  }
+  return recoverInterruptedLocalJobs(now);
+}
+
+async function migrateAndSeed(): Promise<void> {
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       is_demo INTEGER NOT NULL DEFAULT 1,
@@ -245,14 +271,20 @@ export function initDatabase(): { recoveredRunningVersions: number; recoveredRun
   `);
 
   // Safe idempotent schema migrations for pre-existing SQLite databases
-  ensureColumnExists('sessions', 'visitor_key', 'TEXT');
-  ensureColumnExists('personas', 'mbti_group', "TEXT NOT NULL DEFAULT 'NF'");
-  ensureColumnExists('personas', 'cognitive_axis', "TEXT NOT NULL DEFAULT ''");
-  ensureColumnExists('personas', 'speech_style', "TEXT NOT NULL DEFAULT ''");
-  ensureColumnExists('personas', 'visual_trait', "TEXT NOT NULL DEFAULT ''");
-  ensureColumnExists('personas', 'recommended_materials', "TEXT NOT NULL DEFAULT '[]'");
+  await ensureColumnExists('sessions', 'visitor_key', 'TEXT');
+  await ensureColumnExists('card_versions', 'image_settings', 'TEXT');
+  await ensureColumnExists('card_versions', 'simulate_fail', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumnExists('card_versions', 'dispatched_at', 'TEXT');
+  await ensureColumnExists('output_jobs', 'simulate_fail', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumnExists('output_jobs', 'started_at', 'TEXT');
+  await ensureColumnExists('output_jobs', 'dispatched_at', 'TEXT');
+  await ensureColumnExists('personas', 'mbti_group', "TEXT NOT NULL DEFAULT 'NF'");
+  await ensureColumnExists('personas', 'cognitive_axis', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumnExists('personas', 'speech_style', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumnExists('personas', 'visual_trait', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumnExists('personas', 'recommended_materials', "TEXT NOT NULL DEFAULT '[]'");
 
-  db.exec(`
+  await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_sessions_visitor_key
       ON sessions(visitor_key)
       WHERE visitor_key IS NOT NULL;
@@ -299,27 +331,28 @@ export function initDatabase(): { recoveredRunningVersions: number; recoveredRun
   `);
 
   const now = new Date().toISOString();
-  const seedTx = db.transaction(() => {
+  const seedTx = db.transaction(async () => {
+    await db.prepare("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('session_secret', hex(randomblob(32)))").run();
     for (const persona of PERSONA_SEEDS) {
-      upsertPersona.run({
+      await upsertPersona.run({
         ...persona,
         recommendedMaterialsJson: JSON.stringify(persona.recommendedMaterials),
       });
     }
     for (const doll of DEMO_DOLL_SEEDS) {
-      upsertDemoDoll.run({ ...doll, createdAt: now });
-      insertNfcTag.run(doll.nfcAlias, doll.id, `${doll.name} · NFC 展位主签`, now);
+      await upsertDemoDoll.run({ ...doll, createdAt: now });
+      await insertNfcTag.run(doll.nfcAlias, doll.id, `${doll.name} · NFC 展位主签`, now);
     }
 
     // Seed default materials only when materials table is empty (preserve team edits/imports!)
-    const matCount = (db.prepare(`SELECT COUNT(*) AS c FROM materials`).get() as { c: number }).c;
+    const matCount = (await db.prepare(`SELECT COUNT(*) AS c FROM materials`).get() as { c: number }).c;
     if (matCount === 0) {
       const insertMat = db.prepare(`
         INSERT OR IGNORE INTO materials (id, label, category, material, visual_hint, in_stock, sort_order, created_at, updated_at)
         VALUES (@id, @label, @category, @material, @visualHint, @inStock, @sortOrder, @createdAt, @updatedAt)
       `);
       for (const m of DEFAULT_MATERIAL_SEEDS) {
-        insertMat.run({
+        await insertMat.run({
           ...m,
           inStock: m.inStock ? 1 : 0,
           createdAt: now,
@@ -328,21 +361,24 @@ export function initDatabase(): { recoveredRunningVersions: number; recoveredRun
       }
     }
   });
-  seedTx();
+  await seedTx();
+}
 
+async function recoverInterruptedLocalJobs(now: string) {
   // Startup recovery: Unknown running tasks transition to failed with WORKER_RESTARTED
-  const recoveredVersions = db
+  const recoveredVersions = await db
     .prepare(
       `UPDATE card_versions
        SET status = 'failed',
-           error_code = 'WORKER_RESTARTED',
-           error_message = '服务重启前该任务仍在运行且无法确认远端状态，已标记失败以避免重复计费，请按需重试',
+           error_code = CASE WHEN provider = 'cloud' THEN 'GENERATION_STATUS_UNKNOWN' ELSE 'WORKER_RESTARTED' END,
+           error_message = CASE WHEN provider = 'cloud' THEN '生图状态未确认，请先核对服务商的结果与费用'
+                                ELSE '本地生成任务已中断，请重新提交' END,
            finished_at = ?
        WHERE status = 'running'`
     )
     .run(now);
 
-  const recoveredJobs = db
+  const recoveredJobs = await db
     .prepare(
       `UPDATE output_jobs
        SET status = 'failed',
@@ -353,7 +389,7 @@ export function initDatabase(): { recoveredRunningVersions: number; recoveredRun
     )
     .run(now);
 
-  db.prepare(
+  await db.prepare(
     `UPDATE messages
      SET status = 'incomplete',
          error_code = 'WORKER_RESTARTED'
@@ -366,8 +402,8 @@ export function initDatabase(): { recoveredRunningVersions: number; recoveredRun
   };
 }
 
-export function getRuntimeSettings(): RuntimeSettings {
-  const rows = db
+export async function getRuntimeSettings(): Promise<RuntimeSettings> {
+  const rows = await db
     .prepare(`SELECT key, value FROM system_settings`)
     .all() as Array<{ key: string; value: string }>;
   const map = new Map(rows.map((r) => [r.key, r.value]));
@@ -379,6 +415,8 @@ export function getRuntimeSettings(): RuntimeSettings {
   const chatProviderMode: ProviderMode =
     chatModeRaw === 'cloud' || chatModeRaw === 'mock' ? chatModeRaw : config.chatProvider;
 
+  const vendorRaw = map.get('image_vendor');
+  const imageVendor = vendorRaw === 'gemini' || vendorRaw === 'openai' ? vendorRaw : config.imageVendor;
   const imageModeRaw = map.get('image_provider_mode');
   const imageProviderMode: ProviderMode =
     imageModeRaw === 'cloud' || imageModeRaw === 'mock' ? imageModeRaw : config.imageProvider;
@@ -388,31 +426,32 @@ export function getRuntimeSettings(): RuntimeSettings {
 
   return {
     nfcPublicBaseUrl: map.get('nfc_public_base_url') ?? '',
+    imageVendor,
     imageModelTier,
-    imageModel: IMAGE_MODEL_BY_TIER[imageModelTier],
+    imageModel: IMAGE_MODELS[imageVendor][imageModelTier],
     chatProviderMode,
     imageProviderMode,
     strictMaterialConstraint,
   };
 }
 
-export function setRuntimeSetting(key: string, value: string): void {
+export async function setRuntimeSetting(key: string, value: string): Promise<void> {
   const now = new Date().toISOString();
-  db.prepare(
+  await db.prepare(
     `INSERT INTO system_settings (key, value, updated_at)
      VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
   ).run(key, value, now);
 }
 
-export function listMaterials(onlyInStock = false): MaterialRecord[] {
+export async function listMaterials(onlyInStock = false): Promise<MaterialRecord[]> {
   const rows = (onlyInStock
-    ? db
+    ? await db
         .prepare(
           `SELECT * FROM materials WHERE in_stock = 1 ORDER BY sort_order ASC, created_at ASC`
         )
         .all()
-    : db
+    : await db
         .prepare(`SELECT * FROM materials ORDER BY sort_order ASC, created_at ASC`)
         .all()) as Array<Record<string, unknown>>;
 
@@ -429,14 +468,14 @@ export function listMaterials(onlyInStock = false): MaterialRecord[] {
   }));
 }
 
-export function getMaterialsByIds(ids: string[]): MaterialRecord[] {
+export async function getMaterialsByIds(ids: string[]): Promise<MaterialRecord[]> {
   if (!ids || ids.length === 0) return [];
-  const all = listMaterials(false);
+  const all = await listMaterials(false);
   const byId = new Map(all.map((m) => [m.id, m]));
   return ids.map((id) => byId.get(id)).filter((v): v is MaterialRecord => Boolean(v));
 }
 
-export function recordRunLog(entry: {
+export async function recordRunLog(entry: {
   id: string;
   kind: 'chat' | 'image' | 'output' | 'system';
   provider: string;
@@ -447,8 +486,8 @@ export function recordRunLog(entry: {
   errorCode?: string | null;
   requestId?: string | null;
   detail?: string | null;
-}): void {
-  db.prepare(
+}): Promise<void> {
+  await db.prepare(
     `INSERT INTO run_logs (id, kind, provider, result_kind, status, first_token_ms, total_ms, error_code, request_id, detail, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(

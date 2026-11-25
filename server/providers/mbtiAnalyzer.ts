@@ -1,5 +1,5 @@
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import { config, isChatCloudConfigured } from '../config.ts';
+import { config, isChatCloudConfigured, isPhotoMbtiEnabled } from '../config.ts';
+import { requestStepFunJson } from './stepfun.ts';
 import { PERSONA_SEEDS } from '../data/seed.ts';
 import type { MaterialRecord } from '../db.ts';
 
@@ -89,49 +89,15 @@ export async function recommendMbti(input: {
     });
   }
 
-  // If in mock mode, handle deterministically (never pretend cloud ran)
-  if (input.providerMode === 'mock') {
-    if (hasQuiz && input.quizAnswers) {
-      return buildDeterministicQuizRecommendation(input.quizAnswers, input.inStockMaterials);
-    }
-    // Photo-only mock mode: deterministically pick a persona from photo hash
-    const hashByte = input.photoBuffer ? input.photoBuffer[0] + input.photoBuffer[input.photoBuffer.length - 1] : 0;
-    const picked = PERSONA_SEEDS[hashByte % PERSONA_SEEDS.length];
-    const alt1 = PERSONA_SEEDS[(hashByte + 3) % PERSONA_SEEDS.length].mbti;
-    const alt2 = PERSONA_SEEDS[(hashByte + 7) % PERSONA_SEEDS.length].mbti;
-    const inStockSet = new Set(input.inStockMaterials.map((m) => m.id));
-    return {
-      primaryMbti: picked.mbti,
-      primaryPersonaId: picked.id,
-      alternateMbtis: [alt1, alt2].filter((m) => m !== picked.mbti).slice(0, 2),
-      keywords: [picked.mbti, picked.name, '演示模式推荐'],
-      reason: `（当前处于本地演示模式）结合照片氛围，为你匹配了「${picked.name}（${picked.mbti}）」：${picked.tagline}`,
-      suggestedMaterialIds: picked.recommendedMaterials.filter((id) => inStockSet.has(id)).slice(0, 3),
-      source: 'quiz_rule',
-    };
+  if (hasPhoto && (!isPhotoMbtiEnabled() || input.providerMode !== 'cloud')) {
+    throw Object.assign(new Error('照片推荐暂未开放，请使用 4 题快测'), {
+      status: 409,
+      code: 'PHOTO_MBTI_UNAVAILABLE',
+    });
   }
-
-  // Quiz-only works instantaneously & accurately via rule or cloud; if only quiz is given and cloud isn't configured, use deterministic quiz rule
-  if (!hasPhoto && hasQuiz && input.quizAnswers && !isChatCloudConfigured()) {
+  if (input.quizAnswers && (input.providerMode === 'mock' || !isChatCloudConfigured())) {
     return buildDeterministicQuizRecommendation(input.quizAnswers, input.inStockMaterials);
   }
-
-  if (!isChatCloudConfigured()) {
-    throw Object.assign(
-      new Error('云端视觉分析未配置有效 GEMINI_API_KEY，请在控制台切换模式或使用 4 题快测'),
-      { status: 503, code: 'PROVIDER_NOT_CONFIGURED' }
-    );
-  }
-
-  const apiKey = config.chatApiKey || config.geminiApiKey;
-  const ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
 
   const personaCatalog = PERSONA_SEEDS.map(
     (p) => `${p.mbti}（${p.name}，${p.cognitiveAxis}）：${p.tagline}`
@@ -166,67 +132,29 @@ export async function recommendMbti(input: {
     '5. suggestedMaterialIds 必须严格从上面列出的在库材料 ID 中挑选 2–3 个。',
   ].join('\n');
 
-  const parts: Array<{ text: string } | { inlineData: { data: string; mimeType: string } }> = [];
-  if (hasPhoto && input.photoBuffer && input.photoMime) {
-    parts.push({
-      inlineData: {
-        data: input.photoBuffer.toString('base64'),
-        mimeType: input.photoMime,
-      },
-    });
-  }
-  parts.push({ text: promptText });
-
-  const supportsThinkingLevel =
-    config.chatModel.startsWith('gemini-4') || config.chatModel.startsWith('gemini-3');
-
-  const response = await ai.models.generateContent({
-    model: config.chatModel,
-    contents: { parts },
-    config: {
-      ...(supportsThinkingLevel
-        ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-        : {}),
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          primaryMbti: { type: Type.STRING },
-          alternateMbtis: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-          },
-          keywords: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-          },
-          reason: { type: Type.STRING },
-          suggestedMaterialIds: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-          },
-        },
-        required: ['primaryMbti', 'alternateMbtis', 'keywords', 'reason', 'suggestedMaterialIds'],
-      },
-    },
-  });
-
-  const rawText = (response.text || '').trim();
-  if (!rawText) {
-    throw Object.assign(new Error('AI 人格分析未返回有效结果，请重试'), {
-      status: 502,
-      code: 'PROVIDER_ERROR',
-    });
-  }
-
-  const parsed = JSON.parse(rawText) as {
+  const content = hasPhoto
+    ? [
+        { type: 'text' as const, text: promptText },
+        { type: 'image_url' as const, image_url: { url: `data:${input.photoMime};base64,${input.photoBuffer!.toString('base64')}` } },
+      ]
+    : promptText;
+  const outcome = await requestStepFunJson<{
     primaryMbti?: string;
     alternateMbtis?: string[];
     keywords?: string[];
     reason?: string;
     suggestedMaterialIds?: string[];
-  };
+  }>(
+    '只返回一个 JSON 对象，包含 primaryMbti、alternateMbtis、keywords、reason、suggestedMaterialIds。',
+    content,
+    hasPhoto ? config.stepfunVisionModel : undefined,
+  ).then((data) => ({ data })).catch((error) => {
+    if (hasPhoto || !input.quizAnswers) throw error;
+    return { fallback: buildDeterministicQuizRecommendation(input.quizAnswers, input.inStockMaterials) };
+  });
+  if ('fallback' in outcome) return outcome.fallback;
 
+  const parsed = outcome.data;
   const primary = personaByMbti(parsed.primaryMbti || '');
   const inStockSet = new Set(input.inStockMaterials.map((m) => m.id));
 

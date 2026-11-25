@@ -89,7 +89,7 @@ export function setSessionCookie(req: Request, res: Response, session: SessionRe
   const https = isRequestHttps(req);
   res.cookie(config.sessionCookieName, signSessionId(session.id), {
     httpOnly: true,
-    sameSite: https ? 'none' : 'lax',
+    sameSite: 'lax',
     secure: https,
     path: '/',
     expires: new Date(session.expiresAt),
@@ -100,7 +100,7 @@ export function clearSessionCookie(req: Request, res: Response): void {
   const https = isRequestHttps(req);
   res.clearCookie(config.sessionCookieName, {
     httpOnly: true,
-    sameSite: https ? 'none' : 'lax',
+    sameSite: 'lax',
     secure: https,
     path: '/',
   });
@@ -125,8 +125,8 @@ function mapSessionRow(row: {
   };
 }
 
-export function loadSessionById(sessionId: string): SessionRecord | null {
-  const row = db
+export async function loadSessionById(sessionId: string): Promise<SessionRecord | null> {
+  const row = await db
     .prepare(
       `SELECT id, is_demo, invalidated, visitor_key, created_at, expires_at
        FROM sessions
@@ -150,16 +150,16 @@ export function loadSessionById(sessionId: string): SessionRecord | null {
  * 1) Signed HttpOnly cookie (primary)
  * 2) Persistent X-Visitor-Key header fallback when mobile browsers isolate cookies between NFC taps
  */
-export function loadExistingSession(req: Request): SessionRecord | null {
+export async function loadExistingSession(req: Request): Promise<SessionRecord | null> {
   const raw = req.cookies?.[config.sessionCookieName];
   const sid = verifySignedSessionCookie(raw);
   const visitorKey = extractVisitorKey(req);
 
   if (sid) {
-    const cookieSess = loadSessionById(sid);
+    const cookieSess = await loadSessionById(sid);
     if (cookieSess) {
       if (visitorKey && !cookieSess.visitorKey) {
-        db.prepare(`UPDATE sessions SET visitor_key = ? WHERE id = ?`).run(visitorKey, cookieSess.id);
+        await db.prepare(`UPDATE sessions SET visitor_key = ? WHERE id = ?`).run(visitorKey, cookieSess.id);
         cookieSess.visitorKey = visitorKey;
       }
       return cookieSess;
@@ -167,7 +167,7 @@ export function loadExistingSession(req: Request): SessionRecord | null {
   }
 
   if (visitorKey) {
-    const row = db
+    const row = await db
       .prepare(
         `SELECT id, is_demo, invalidated, visitor_key, created_at, expires_at
          FROM sessions
@@ -194,7 +194,7 @@ export function loadExistingSession(req: Request): SessionRecord | null {
   return null;
 }
 
-export function createNewSession(visitorKey?: string | null): SessionRecord {
+export async function createNewSession(visitorKey?: string | null): Promise<SessionRecord> {
   const id = `sess_${crypto.randomBytes(12).toString('hex')}`;
   const now = new Date();
   const expires = new Date(now.getTime() + config.sessionTtlDays * 24 * 60 * 60 * 1000);
@@ -206,19 +206,31 @@ export function createNewSession(visitorKey?: string | null): SessionRecord {
     expiresAt: expires.toISOString(),
   };
 
-  db.prepare(
-    `INSERT INTO sessions (id, is_demo, invalidated, visitor_key, created_at, expires_at)
-     VALUES (?, 1, 0, ?, ?, ?)`
-  ).run(record.id, record.visitorKey, record.createdAt, record.expiresAt);
+  const create = db.transaction(async () => {
+    if (visitorKey) {
+      const existing = await db.prepare(
+        `SELECT id, is_demo, invalidated, visitor_key, created_at, expires_at
+         FROM sessions WHERE visitor_key = ? AND invalidated = 0 AND expires_at > ?
+         ORDER BY created_at DESC LIMIT 1`
+      ).get(visitorKey, record.createdAt) as Parameters<typeof mapSessionRow>[0];
+      const restored = mapSessionRow(existing);
+      if (restored) return restored;
+    }
+    await db.prepare(
+      `INSERT INTO sessions (id, is_demo, invalidated, visitor_key, created_at, expires_at)
+       VALUES (?, 1, 0, ?, ?, ?)`
+    ).run(record.id, record.visitorKey, record.createdAt, record.expiresAt);
+    return record;
+  });
 
-  return record;
+  return create();
 }
 
-export function ensureSession(req: Request, res: Response, next: NextFunction): void {
+export async function ensureSession(req: Request, res: Response, next: NextFunction): Promise<void> {
   const visitorKey = extractVisitorKey(req);
-  let session = loadExistingSession(req);
+  let session = await loadExistingSession(req);
   if (!session) {
-    session = createNewSession(visitorKey);
+    session = await createNewSession(visitorKey);
     setSessionCookie(req, res, session);
   } else if (!req.cookies?.[config.sessionCookieName]) {
     // Re-hydrate HttpOnly cookie if restored via visitor key
@@ -229,6 +241,10 @@ export function ensureSession(req: Request, res: Response, next: NextFunction): 
 }
 
 export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  if (!config.demoAdminToken) {
+    sendError(req, res, 503, 'ADMIN_NOT_CONFIGURED', '请在服务端设置 DEMO_ADMIN_TOKEN 后启用管理功能');
+    return;
+  }
   const authHeader = req.get('authorization') || '';
   const bearer = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
   const headerToken = (req.get('x-admin-token') || '').trim();

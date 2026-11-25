@@ -20,7 +20,6 @@ import {
 import { api, ApiError } from '../lib/api';
 import {
   isIosDevice,
-  isIphoneBackgroundReadCompatible,
   isWebNfcSupported,
   readUrlFromNfcTag,
   writeUrlToNfcTag,
@@ -28,6 +27,7 @@ import {
 import type {
   DemoStatusPayload,
   ImageModelTier,
+  ImageVendor,
   MaterialCategory,
   MaterialRecord,
   ProviderMode,
@@ -97,6 +97,7 @@ export function DevAdminPage() {
   // NFC workshop state
   const [nfcFeedback, setNfcFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [nfcBusyAlias, setNfcBusyAlias] = useState<string | null>(null);
+  const [testTagsConfirmed, setTestTagsConfirmed] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [newAlias, setNewAlias] = useState('');
   const [newAliasDollId, setNewAliasDollId] = useState('');
@@ -119,7 +120,7 @@ export function DevAdminPage() {
   const loadAllAdminData = async (tokenToUse: string) => {
     const trimmed = tokenToUse.trim();
     if (!trimmed) {
-      setError('请输入 DEMO_ADMIN_TOKEN 后加载状态（默认：demo-admin-2026）。');
+      setError('请输入 DEMO_ADMIN_TOKEN 后加载状态。');
       return;
     }
     setLoading(true);
@@ -165,6 +166,7 @@ export function DevAdminPage() {
     patch: Partial<{
       nfcPublicBaseUrl: string;
       imageModelTier: ImageModelTier;
+      imageVendor: ImageVendor;
       chatProviderMode: ProviderMode;
       imageProviderMode: ProviderMode;
       strictMaterialConstraint: boolean;
@@ -198,49 +200,50 @@ export function DevAdminPage() {
     }
   };
 
+  const nfcScope = status?.settings.nfcWriteScope ?? 'unavailable';
+  const canWriteTag = nfcScope === 'production' || (nfcScope === 'test' && testTagsConfirmed);
+
   const handleWebNfcWrite = async (alias: string, url: string) => {
-    if (nfcBusyAlias) return;
+    if (nfcBusyAlias || !canWriteTag) return;
     haptic('medium');
     setNfcBusyAlias(alias);
     if (isWebNfcSupported()) {
-      setNfcFeedback({ ok: true, text: `等待写入「${alias}」：请将 NTAG213/215 贴纸贴近手机背面 NFC 感应区…` });
+      setNfcFeedback({ ok: true, text: `请将 ${alias} 的贴纸放到手机 NFC 感应区…` });
     }
-    const res = await writeUrlToNfcTag(url);
-    if (res.ok && !res.iosCopied && adminToken.trim()) {
-      try {
-        await api.markNfcTagWritten(adminToken.trim(), alias);
-        await loadAllAdminData(adminToken.trim());
-      } catch {
-        // Non-blocking timestamp update
-      }
-    }
+    const result = await writeUrlToNfcTag(url);
     setNfcBusyAlias(null);
-    setNfcFeedback({ ok: res.ok, text: res.message });
-    haptic(res.ok ? 'success' : 'warning');
+    setNfcFeedback({
+      ok: result.ok,
+      text: result.ok && !result.copied ? '已写入，请移开标签后再贴近，完成读回校验。' : result.message,
+    });
+    haptic(result.ok ? 'success' : 'warning');
   };
 
-  const handleMarkIosWritten = async (alias: string) => {
-    if (!adminToken.trim()) return;
+  const handleNfcReadback = async (alias: string, expectedUrl: string) => {
+    if (nfcBusyAlias || !canWriteTag || !adminToken.trim()) return;
+    setNfcBusyAlias(alias);
     try {
-      await api.markNfcTagWritten(adminToken.trim(), alias);
+      let readUrl: string | undefined;
+      if (isWebNfcSupported()) {
+        setNfcFeedback({ ok: true, text: `请贴近 ${alias} 的标签进行读回校验…` });
+        const result = await readUrlFromNfcTag(expectedUrl);
+        if (!result.ok) throw new Error(result.message);
+        readUrl = result.url;
+      } else {
+        readUrl = window.prompt('把 NFC Tools 从同一张标签读出的唯一 URL 贴在这里。')?.trim();
+        if (!readUrl) return;
+      }
+      if (readUrl !== expectedUrl) throw new Error(`标签地址不匹配。应为 ${expectedUrl}`);
+      await api.markNfcTagWritten(adminToken.trim(), alias, readUrl, nfcScope);
       await loadAllAdminData(adminToken.trim());
-      setNfcFeedback({ ok: true, text: `已记录「/nfc/${alias}」由 iPhone / NFC Tools 完成写签！` });
+      setNfcFeedback({ ok: true, text: `已校验 ${alias}。标签读回的 URL 与预期一致。` });
       haptic('success');
     } catch (err) {
-      setNfcFeedback({ ok: false, text: err instanceof Error ? err.message : '标记写签记录失败' });
+      setNfcFeedback({ ok: false, text: err instanceof Error ? err.message : '标签读回校验失败' });
       haptic('warning');
+    } finally {
+      setNfcBusyAlias(null);
     }
-  };
-
-  const handleWebNfcReadback = async () => {
-    if (nfcBusyAlias) return;
-    haptic('light');
-    setNfcBusyAlias('__read__');
-    setNfcFeedback({ ok: true, text: '请将已写入的 NFC 标签贴近手机背面进行读回校验…' });
-    const res = await readUrlFromNfcTag();
-    setNfcBusyAlias(null);
-    setNfcFeedback({ ok: res.ok, text: res.message });
-    haptic(res.ok ? 'success' : 'warning');
   };
 
   const handleAddNfcTag = async (e: React.FormEvent) => {
@@ -439,7 +442,7 @@ export function DevAdminPage() {
             aria-label="管理员令牌"
             value={adminToken}
             onChange={(e) => setAdminToken(e.target.value)}
-            placeholder="管理员令牌（默认：demo-admin-2026）"
+            placeholder="输入服务端配置的管理令牌"
             className="flex-1 min-w-0 px-3 py-2 text-[16px] sm:text-xs font-mono text-[#382A22] placeholder:text-[#B3A497] bg-[#FAF7F2] border border-[#E4DBCE] rounded-xl focus:outline-none focus:bg-white focus:ring-2 focus:ring-[#4A8276]/20 focus:border-[#4A8276]"
           />
         </div>
@@ -552,10 +555,23 @@ export function DevAdminPage() {
                           {status.settings.imageModel}
                         </span>
                       </div>
+                      {!status.settings.imageGenerationEnabled && <p className="text-xs text-[#875220]">公开预览生图待开放</p>}
+                      <label className="flex items-center gap-2 text-xs text-[#6E5C50]">
+                        生图服务
+                        <select
+                          value={status.settings.imageVendor}
+                          disabled={savingSettings}
+                          onChange={(event) => void handleUpdateSettings({ imageVendor: event.target.value as ImageVendor }, '已更新生图服务')}
+                          className="rounded-lg border border-[#E4DBCE] bg-[#FAF7F2] px-2 py-1"
+                        >
+                          <option value="openai">OpenAI GPT Image</option>
+                          <option value="gemini">Google Nano Banana</option>
+                        </select>
+                      </label>
                       <div className="grid grid-cols-2 gap-2">
                         {(
                           [
-                            { tier: 'fast' as const, title: 'Nano Banana 极速版', desc: '默认 · 展位低延迟' },
+                            { tier: 'fast' as const, title: '快速', desc: '适合预览形象' },
                             { tier: 'hd' as const, title: 'Nano 2.1 高清精绘', desc: '1K 细节 · 精选出图' },
                           ] as const
                         ).map((opt) => {
@@ -614,7 +630,7 @@ export function DevAdminPage() {
                                     : 'text-[#6E5C50]'
                                 }`}
                               >
-                                {m === 'cloud' ? '云端 Gemini' : '本地演示'}
+                                {m === 'cloud' ? '阶跃星辰 StepFun' : '本地演示'}
                               </button>
                             ))}
                           </div>
@@ -683,7 +699,7 @@ export function DevAdminPage() {
                       </span>
                     </div>
                     <div className="font-editorial text-base font-semibold text-[#382A22]">
-                      {status.providers.chat.mode === 'cloud' ? '云端 Gemini (cloud)' : '本地演示 (mock)'}
+                      {status.providers.chat.mode === 'cloud' ? '阶跃星辰 StepFun (cloud)' : '本地演示 (mock)'}
                     </div>
                     <div className="text-[11px] font-mono text-[#6E5C50] flex items-center justify-between pt-2 border-t border-[#F0E9DF]">
                       <span className="truncate">{status.providers.chat.model}</span>
@@ -804,6 +820,7 @@ export function DevAdminPage() {
                     </span>
                   </div>
 
+                  {status.settings.nfcBaseUrlEditable && (
                   <form
                     onSubmit={(e) => {
                       e.preventDefault();
@@ -818,7 +835,7 @@ export function DevAdminPage() {
                       type="text"
                       value={nfcBaseUrlInput}
                       onChange={(e) => setNfcBaseUrlInput(e.target.value)}
-                      placeholder="例如：https://nutshell.yourdomain.com 或 http://192.168.1.20:3000（留空则自动识别）"
+                      placeholder="https://nutshell.yourdomain.com"
                       className="flex-1 min-w-0 px-3 py-2 text-[14px] sm:text-xs font-mono bg-[#FAF7F2] border border-[#E4DBCE] rounded-xl focus:outline-none focus:bg-white focus:border-[#4A8276]"
                     />
                     <button
@@ -830,18 +847,18 @@ export function DevAdminPage() {
                       <span>保存域名</span>
                     </button>
                   </form>
+                  )}
 
-                  {!isIphoneBackgroundReadCompatible(status.settings.effectiveBaseUrl) ? (
-                    <div className="p-3 rounded-xl bg-[#FDF4E8] border border-[#ECCEA6] text-xs text-[#875220] leading-relaxed">
-                      <strong>iPhone 碰一碰重要提示：</strong>当前生效域名为{' '}
-                      <code className="font-mono">{status.settings.effectiveBaseUrl}</code>（非公网 HTTPS）。苹果手机原生碰一碰弹窗必须写入{' '}
-                      <code className="font-mono">https://</code> 公网地址，请将上方域名设为你们的公网 HTTPS 地址后再写签。
-                    </div>
-                  ) : (
-                    <div className="p-3 rounded-xl bg-[#EEF7F4] border border-[#CBE4DB] text-xs text-[#2B5D51] leading-relaxed">
-                      <strong>iPhone &amp; Android 碰一碰均已就绪：</strong>当前为公网 HTTPS 地址，写入任意 NTAG213/215 贴纸后，
-                      <strong>iPhone（XS 及以上）亮屏用手机顶部贴近贴纸即可原生弹出 Safari 横幅唤醒</strong>，无需安装任何 App。
-                    </div>
+                  <p className="text-xs text-[#6E5C50] break-all">{status.settings.effectiveBaseUrl}</p>
+                  {nfcScope === 'unavailable' && (
+                    <p className="text-xs text-[#875220]">配置正式 HTTPS 域名后可写入正式贴纸。</p>
+                  )}
+                  {nfcScope === 'test' && (
+                    <label className="flex items-center gap-2 rounded-lg bg-[#FDF4E8] px-3 py-2 text-xs text-[#875220]">
+                      <input type="checkbox" checked={testTagsConfirmed}
+                        onChange={(event) => setTestTagsConfirmed(event.target.checked)} />
+                      我使用的是单独的测试贴纸
+                    </label>
                   )}
                 </section>
 
@@ -880,25 +897,13 @@ export function DevAdminPage() {
                         NFC 贴纸直写与批量导出清单
                       </h2>
                       <p className="text-xs text-[#8E7C6E] mt-0.5">
-                        {isWebNfcSupported()
-                          ? '已检测到 Android Chrome Web NFC 能力，可直接点下方「写入标签」与「读回校验」。'
-                          : isIosDevice()
-                          ? '当前为 iPhone/iPad：点击下方「复制给 NFC Tools」即可一键复制链接并用 NFC Tools 写签；写完可点「标已写签」同步进度。'
-                          : '当前设备不支持浏览器直写（Android Chrome 支持网页直写；iPhone 请复制链接或导出清单用免费 App「NFC Tools」写签）。'}
+                        写入一条 URL/URI 记录。写完后读回同一张贴纸，核对完整地址。
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        onClick={handleWebNfcReadback}
-                        disabled={Boolean(nfcBusyAlias)}
-                        className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium btn-paper-soft whitespace-nowrap"
-                      >
-                        <Radio className="w-3.5 h-3.5 text-[#4A8276]" />
-                        <span>读回校验</span>
-                      </button>
-                      <button
-                        type="button"
+                        disabled={!canWriteTag}
                         onClick={() => void handleCopyText('export_txt', buildNfcExportTxt())}
                         className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium btn-ink-tinted whitespace-nowrap"
                       >
@@ -911,6 +916,7 @@ export function DevAdminPage() {
                       </button>
                       <button
                         type="button"
+                        disabled={!canWriteTag}
                         onClick={() =>
                           downloadTextFile(
                             'nutshell_nfc_links.csv',
@@ -958,7 +964,7 @@ export function DevAdminPage() {
                             </span>
                             {tag.lastWrittenAt && (
                               <span className="text-[10.5px] text-[#4A8276]">
-                                已写签 {new Date(tag.lastWrittenAt).toLocaleTimeString('zh-CN', { hour12: false })}
+                                已校验 {new Date(tag.lastWrittenAt).toLocaleTimeString('zh-CN', { hour12: false })}
                               </span>
                             )}
                           </div>
@@ -970,7 +976,7 @@ export function DevAdminPage() {
                         <div className="flex flex-wrap items-center gap-2 shrink-0">
                           <button
                             type="button"
-                            disabled={Boolean(nfcBusyAlias)}
+                            disabled={!canWriteTag || Boolean(nfcBusyAlias)}
                             onClick={() => void handleWebNfcWrite(tag.alias, tag.nfcUrl)}
                             className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium btn-ink-tinted whitespace-nowrap"
                           >
@@ -983,19 +989,17 @@ export function DevAdminPage() {
                                 : '写入标签'}
                             </span>
                           </button>
-                          {!isWebNfcSupported() && (
-                            <button
-                              type="button"
-                              onClick={() => void handleMarkIosWritten(tag.alias)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium btn-paper-soft whitespace-nowrap"
-                              title="用 iPhone NFC Tools 写完后可点击记录写签时间"
-                            >
-                              <Check className="w-3.5 h-3.5 text-[#4A8276]" />
-                              <span>标已写签</span>
-                            </button>
-                          )}
                           <button
                             type="button"
+                            onClick={() => void handleNfcReadback(tag.alias, tag.nfcUrl)}
+                            disabled={!canWriteTag || Boolean(nfcBusyAlias)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium btn-paper-soft whitespace-nowrap"
+                          >
+                            <span>{isWebNfcSupported() ? '读回校验' : '核对读回地址'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!canWriteTag}
                             onClick={() => void handleCopyText(tag.alias, tag.nfcUrl)}
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium btn-paper-soft whitespace-nowrap"
                           >
@@ -1006,13 +1010,13 @@ export function DevAdminPage() {
                             )}
                             <span>{copiedKey === tag.alias ? '已复制' : '复制'}</span>
                           </button>
-                          <Link
-                            to={`/nfc/${encodeURIComponent(tag.alias)}`}
+                          <a
+                            href={`/nfc/${encodeURIComponent(tag.alias)}`}
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium btn-icon-ghost whitespace-nowrap"
                           >
                             <ExternalLink className="w-3.5 h-3.5 text-[#4A8276]" />
-                            <span>模拟碰一碰</span>
-                          </Link>
+                            <span>打开 NFC 链接</span>
+                          </a>
                         </div>
                       </div>
                     ))}
@@ -1096,6 +1100,7 @@ export function DevAdminPage() {
                       </button>
                       <button
                         type="button"
+                        disabled={!canWriteTag}
                         onClick={() =>
                           downloadTextFile(
                             'nutshell_materials_export.json',
@@ -1387,7 +1392,7 @@ export function DevAdminPage() {
                     <div className="p-3 rounded-xl studio-inset space-y-1">
                       <div className="font-semibold text-[#382A22]">3. Google Nano × 实材库</div>
                       <p className="text-[11px] text-[#6E5C50] leading-relaxed">
-                        支持 Nano Banana 极速版 / 2.1 高清版运行期热切换，严格绑定工坊在库天然果壳与布艺实材清单。
+                        生图请求使用创建任务时选定的服务、模型和材料约束。
                       </p>
                     </div>
                   </div>

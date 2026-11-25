@@ -126,7 +126,6 @@ export function DollChatPage() {
     setLoading(true);
     setPageError(null);
     try {
-      await api.initSession();
       const [d, msgRes, mems] = await Promise.all([
         api.getDoll(dollId),
         api.getMessages(dollId, 60),

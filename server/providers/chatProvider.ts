@@ -1,5 +1,5 @@
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { config, isChatCloudConfigured } from '../config.ts';
+import { requestStepFun, stepFunError } from './stepfun.ts';
 
 export interface ChatPersonaContext {
   id: string;
@@ -98,7 +98,7 @@ class CloudChatProvider implements ChatProvider {
       yield {
         type: 'error',
         code: 'PROVIDER_NOT_CONFIGURED',
-        message: '真实对话模型未配置有效密钥（请设置 GEMINI_API_KEY 或 CHAT_API_KEY）',
+        message: '阶跃星辰对话尚未配置 STEPFUN_API_KEY',
       };
       return;
     }
@@ -106,133 +106,10 @@ class CloudChatProvider implements ChatProvider {
     const systemInstruction = buildSystemPrompt(input);
     const trimmedHistory = trimHistory(input.history, config.chatContextMaxMessages);
 
-    if (config.chatApiBase) {
-      yield* this.streamOpenAICompatible(systemInstruction, trimmedHistory, input);
-      return;
-    }
-
-    yield* this.streamGemini(systemInstruction, trimmedHistory, input);
+    yield* this.streamStepFun(systemInstruction, trimmedHistory, input);
   }
 
-  private async *streamGemini(
-    systemInstruction: string,
-    history: ChatHistoryMessage[],
-    input: ChatStreamInput
-  ): AsyncGenerator<ChatStreamEvent, void, unknown> {
-    const apiKey = config.chatApiKey || config.geminiApiKey;
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
-
-    const contents = [
-      ...history.map((m) => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
-      })),
-      {
-        role: 'user',
-        parts: [{ text: input.userText }],
-      },
-    ];
-
-    let firstTokenTimer: ReturnType<typeof setTimeout> | null = null;
-    let firstTokenReceived = false;
-    let timedOut = false;
-
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      firstTokenTimer = setTimeout(() => {
-        if (!firstTokenReceived) {
-          timedOut = true;
-          reject(Object.assign(new Error('首字响应超时'), { code: 'CHAT_TIMEOUT' }));
-        }
-      }, config.chatFirstTokenTimeoutMs);
-    });
-
-    try {
-      const supportsThinkingLevel =
-        config.chatModel.startsWith('gemini-4') || config.chatModel.startsWith('gemini-3');
-      const callStream = () =>
-        ai.models.generateContentStream({
-          model: config.chatModel,
-          contents,
-          config: {
-            systemInstruction,
-            ...(supportsThinkingLevel
-              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-              : {}),
-          },
-        });
-
-      let stream;
-      try {
-        stream = await Promise.race([callStream(), timeoutPromise]);
-      } catch (firstErr: unknown) {
-        const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
-        const isTransient503 = msg.includes('503') || msg.includes('UNAVAILABLE');
-        if (isTransient503 && !timedOut && !input.signal?.aborted) {
-          await new Promise((r) => setTimeout(r, 900));
-          stream = await Promise.race([callStream(), timeoutPromise]);
-        } else {
-          throw firstErr;
-        }
-      }
-
-      const iterator = stream[Symbol.asyncIterator]();
-
-      while (true) {
-        if (input.signal?.aborted) {
-          return;
-        }
-        const nextPromise = iterator.next();
-        const result = firstTokenReceived
-          ? await nextPromise
-          : await Promise.race([nextPromise, timeoutPromise]);
-
-        if (result.done) break;
-        const chunkText = result.value?.text ?? '';
-        if (chunkText) {
-          if (!firstTokenReceived) {
-            firstTokenReceived = true;
-            if (firstTokenTimer) clearTimeout(firstTokenTimer);
-          }
-          yield { type: 'delta', text: chunkText };
-        }
-      }
-
-      if (firstTokenTimer) clearTimeout(firstTokenTimer);
-      yield { type: 'done', providerRequestId: `gemini_${input.requestId}` };
-    } catch (err: unknown) {
-      if (firstTokenTimer) clearTimeout(firstTokenTimer);
-      const errObj = err as { code?: string; status?: number; message?: string };
-      if (timedOut || errObj?.code === 'CHAT_TIMEOUT') {
-        yield {
-          type: 'error',
-          code: 'CHAT_TIMEOUT',
-          message: `对话首字响应超过 ${config.chatFirstTokenTimeoutMs}ms 超时上限`,
-        };
-        return;
-      }
-      const rawMsg = errObj?.message || '云端对话服务调用失败';
-      const friendlyMsg =
-        rawMsg.includes('503') || rawMsg.includes('UNAVAILABLE')
-          ? '云端对话模型当前处于高负载高峰（HTTP 503），请稍后点击重试'
-          : rawMsg.includes('429') || rawMsg.includes('RESOURCE_EXHAUSTED')
-          ? '云端对话模型触发配额限流（HTTP 429），请稍后重试'
-          : rawMsg.slice(0, 220);
-      yield {
-        type: 'error',
-        code: 'PROVIDER_ERROR',
-        message: friendlyMsg,
-      };
-    }
-  }
-
-  private async *streamOpenAICompatible(
+  private async *streamStepFun(
     systemInstruction: string,
     history: ChatHistoryMessage[],
     input: ChatStreamInput
@@ -249,40 +126,24 @@ class CloudChatProvider implements ChatProvider {
     }, config.chatFirstTokenTimeoutMs);
 
     const onExternalAbort = () => controller.abort();
-    input.signal?.addEventListener('abort', onExternalAbort);
+    if (input.signal?.aborted) onExternalAbort();
+    input.signal?.addEventListener('abort', onExternalAbort, { once: true });
 
     try {
-      const endpoint = `${config.chatApiBase.replace(/\/+$/, '')}/chat/completions`;
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${config.chatApiKey}`,
-        },
-        body: JSON.stringify({
-          model: config.chatModel,
-          stream: true,
-          messages: [
-            { role: 'system', content: systemInstruction },
-            ...history.map((h) => ({ role: h.role, content: h.content })),
-            { role: 'user', content: input.userText },
-          ],
-        }),
-        signal: controller.signal,
-      });
+      const response = await requestStepFun({
+        stream: true,
+        max_tokens: 600,
+        messages: [
+          { role: 'system', content: systemInstruction },
+          ...history,
+          { role: 'user', content: input.userText },
+        ],
+      }, AbortSignal.any([controller.signal, AbortSignal.timeout(45000)]));
 
-      if (!response.ok || !response.body) {
-        clearTimeout(timer);
-        const bodyText = await response.text().catch(() => '');
-        yield {
-          type: 'error',
-          code: 'PROVIDER_ERROR',
-          message: `对话接口返回 HTTP ${response.status}${bodyText ? `: ${bodyText.slice(0, 120)}` : ''}`,
-        };
-        return;
-      }
+      if (!response.ok || !response.body) throw stepFunError(response.status);
 
-      const providerReqId = response.headers.get('x-request-id') || `oai_${input.requestId}`;
+      let providerReqId = response.headers.get('x-request-id') || undefined;
+      let completed = false;
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -298,10 +159,16 @@ class CloudChatProvider implements ChatProvider {
           const line = rawLine.trim();
           if (!line.startsWith('data:')) continue;
           const payload = line.slice(5).trim();
-          if (payload === '[DONE]') continue;
+          if (payload === '[DONE]') {
+            completed = true;
+            break;
+          }
           try {
             const parsed = JSON.parse(payload);
-            const delta = parsed?.choices?.[0]?.delta?.content;
+            providerReqId ||= typeof parsed?.id === 'string' ? parsed.id : undefined;
+            const choice = parsed?.choices?.[0];
+            if (choice?.finish_reason === 'stop') completed = true;
+            const delta = choice?.delta?.content;
             if (typeof delta === 'string' && delta.length > 0) {
               if (!firstTokenReceived) {
                 firstTokenReceived = true;
@@ -313,9 +180,16 @@ class CloudChatProvider implements ChatProvider {
             // Ignore partial SSE comment lines
           }
         }
+        if (completed) {
+          await reader.cancel().catch(() => {});
+          break;
+        }
       }
 
-      clearTimeout(timer);
+      if (!completed || !firstTokenReceived) {
+        yield { type: 'error', code: 'PROVIDER_INCOMPLETE', message: '阶跃星辰对话回复未完整返回，请重试' };
+        return;
+      }
       yield { type: 'done', providerRequestId: providerReqId };
     } catch (err: unknown) {
       clearTimeout(timer);
@@ -327,9 +201,14 @@ class CloudChatProvider implements ChatProvider {
         };
         return;
       }
-      const message = err instanceof Error ? err.message : '对话接口连接失败';
-      yield { type: 'error', code: 'PROVIDER_ERROR', message };
+      const e = err as { code?: string; message?: string };
+      yield {
+        type: 'error',
+        code: e.code || 'PROVIDER_ERROR',
+        message: e.code && e.message ? e.message : '阶跃星辰对话连接中断，请重试',
+      };
     } finally {
+      clearTimeout(timer);
       input.signal?.removeEventListener('abort', onExternalAbort);
     }
   }

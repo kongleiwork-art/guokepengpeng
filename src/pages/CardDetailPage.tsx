@@ -112,11 +112,14 @@ export function CardDetailPage() {
 
   const handleRedraw = async (simulateFail = false) => {
     if (!card || actionBusy) return;
+    const latestCloudVersion = [...card.versions].reverse().find((version) => version.provider === 'cloud');
+    const reviewedUnknown = latestCloudVersion?.errorCode === 'GENERATION_STATUS_UNKNOWN';
+    if (reviewedUnknown && !window.confirm('请在生图服务商控制台核对上一次结果和费用。确认核对完成后再提交新的生成任务。')) return;
     haptic('light');
     setActionBusy('redraw');
     setActionMsg(null);
     try {
-      const res = await api.redrawCard(card.id, generateIdempotencyKey('redraw'), { simulateFail });
+      const res = await api.redrawCard(card.id, generateIdempotencyKey('redraw'), { simulateFail, reviewedUnknown });
       setSelectedVersionId(res.versionId);
       await refreshCardAndJobs();
       setActionMsg({
@@ -126,6 +129,9 @@ export function CardDetailPage() {
     } catch (err) {
       const text = err instanceof ApiError ? `[${err.code}] ${err.message}` : '重生成请求失败';
       setActionMsg({ kind: 'err', text });
+      if (err instanceof ApiError && err.code === 'QUEUE_UNAVAILABLE') {
+        await refreshCardAndJobs().catch(() => {});
+      }
     } finally {
       setActionBusy(null);
     }
@@ -223,7 +229,7 @@ export function CardDetailPage() {
 
   const handleCopyDollUrl = async () => {
     if (!card?.boundDoll) return;
-    const url = `${window.location.origin}/d/${card.boundDoll.id}`;
+    const url = card.boundDoll.dollUrl;
     try {
       await navigator.clipboard.writeText(url);
       haptic('success');
@@ -625,7 +631,7 @@ export function CardDetailPage() {
                       角色固定链接（关闭再打开可恢复对话与记忆）
                     </div>
                     <div className="text-xs font-mono text-[#382A22] bg-white border border-[#EAE2D6] px-3 py-2 rounded-lg break-all">
-                      {`${window.location.origin}/d/${card.boundDoll.id}`}
+                      {card.boundDoll.dollUrl}
                     </div>
                     <button
                       type="button"
