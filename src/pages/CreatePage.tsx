@@ -4,17 +4,13 @@ import { motion } from 'motion/react';
 import {
   ArrowLeft,
   ArrowRight,
-  Camera,
   Check,
-  RefreshCw,
   Sparkles,
-  Upload,
-  Wand2,
-  X,
 } from 'lucide-react';
 import { api, ApiError, compressImageForUpload, generateIdempotencyKey } from '../lib/api';
 import type {
   AccessoryOption,
+  FallbackTemplate,
   MaterialCategory,
   MbtiRecommendation,
   MbtiQuizAnswers,
@@ -22,6 +18,7 @@ import type {
 } from '../lib/types';
 import { WatercolorPersonaGridSkeleton } from '../components/WatercolorLoader';
 import { MbtiAiGuidePanel } from '../components/MbtiAiGuidePanel';
+import { PortraitCapture } from '../components/PortraitCapture';
 import { haptic } from '../lib/haptics';
 
 type WizardStep = 1 | 2 | 3;
@@ -68,11 +65,13 @@ export function CreatePage() {
 
   const [personas, setPersonas] = useState<PersonaPublic[]>([]);
   const [accessories, setAccessories] = useState<AccessoryOption[]>([]);
+  const [templates, setTemplates] = useState<FallbackTemplate[]>([]);
   const [loadingInit, setLoadingInit] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [creationEnabled, setCreationEnabled] = useState(false);
   const [photoMbtiEnabled, setPhotoMbtiEnabled] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState<MbtiQuizAnswers>({});
+  const [personaToolsOpened, setPersonaToolsOpened] = useState(false);
 
   const [step, setStep] = useState<WizardStep>(1);
   const [desktopRightTab, setDesktopRightTab] = useState<'persona' | 'accessories'>('persona');
@@ -85,21 +84,18 @@ export function CreatePage() {
   const [showAllPersonas, setShowAllPersonas] = useState(false);
   const [selectedAccessories, setSelectedAccessories] = useState<string[]>([]);
 
-  // Optional Selfie AI Recommendation in manual tab
-  const [recommending, setRecommending] = useState(false);
+  const [pendingAnalysis, setPendingAnalysis] = useState<'photo' | 'quiz' | null>(null);
+  const recommending = pendingAnalysis !== null;
   const [recommendation, setRecommendation] = useState<MbtiRecommendation | null>(null);
   const [recommendError, setRecommendError] = useState<string | null>(null);
+  const [photoRecommendation, setPhotoRecommendation] = useState<MbtiRecommendation | null>(null);
+  const [photoRecommendError, setPhotoRecommendError] = useState<string | null>(null);
+  const draftRef = useRef<HTMLElement>(null);
 
-  const [photoSourceMode, setPhotoSourceMode] = useState<'upload' | 'camera'>('upload');
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
-  const [photoInfo, setPhotoInfo] = useState<string | null>(null);
   const [photoError, setPhotoError] = useState<string | null>(null);
-
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const [cameraActive, setCameraActive] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [photoPreparing, setPhotoPreparing] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -114,10 +110,15 @@ export function CreatePage() {
         setCreationEnabled(capabilities.imageGenerationEnabled);
         setPhotoMbtiEnabled(capabilities.photoMbtiEnabled);
         await api.initSession();
-        const [pList, aList] = await Promise.all([api.listPersonas(), api.listAccessories()]);
+        const [pList, aList, references] = await Promise.all([
+          api.listPersonas(),
+          api.listAccessories(),
+          capabilities.photoMbtiEnabled ? api.listTemplates().catch(() => []) : Promise.resolve([]),
+        ]);
         if (!active) return;
         setPersonas(pList);
         setAccessories(aList);
+        setTemplates(references);
 
         const matchedPreset = presetPersonaId
           ? pList.find((p) => p.id === presetPersonaId || p.mbti.toLowerCase() === presetPersonaId.toLowerCase())
@@ -142,98 +143,50 @@ export function CreatePage() {
         if (active) setLoadingInit(false);
       }
     })();
-    return () => {
-      active = false;
-      stopCamera();
-    };
+    return () => { active = false; };
   }, [presetPersonaId]);
 
   useEffect(() => {
-    return () => {
-      if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
-    };
-  }, [photoPreviewUrl]);
+    const url = photoFile ? URL.createObjectURL(photoFile) : null;
+    setPhotoPreviewUrl(url);
+    return () => { if (url) URL.revokeObjectURL(url); };
+  }, [photoFile]);
 
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-    setCameraActive(false);
+  useEffect(() => {
+    if (photoRecommendation) draftRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [photoRecommendation]);
+
+  const clearPhoto = () => {
+    setPhotoFile(null);
+    setPhotoError(null);
+    setPhotoRecommendError(null);
+    setPhotoRecommendation(null);
+    idemKeyRef.current = generateIdempotencyKey('card');
   };
 
-  const startCamera = async () => {
-    setCameraError(null);
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setCameraError('当前浏览器不支持摄像头采集，请改用相册上传。');
+  const acceptImageBlob = async (blob: Blob) => {
+    setPhotoError(null);
+    if (blob.size > 24 * 1024 * 1024) {
+      setPhotoError('这张照片太大，请从相册选一张小于 24 MB 的照片。');
       return;
     }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 960 } },
-        audio: false,
-      });
-      streamRef.current = stream;
-      setCameraActive(true);
-      requestAnimationFrame(() => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          void videoRef.current.play().catch(() => {});
-        }
-      });
-    } catch (err) {
-      setCameraError(
-        err instanceof Error ? `无法打开摄像头：${err.message}` : '无法打开摄像头，请改用相册上传'
-      );
-    }
-  };
-
-  const handleCaptureSnapshot = async () => {
-    const video = videoRef.current;
-    if (!video || video.videoWidth === 0) return;
-    haptic('medium');
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0);
-    const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.9)
-    );
-    if (!blob) return;
-    stopCamera();
-    await acceptImageBlob(blob, '摄像头拍摄');
-  };
-
-  const acceptImageBlob = async (blob: Blob, sourceLabel: string) => {
-    setPhotoError(null);
+    setPhotoPreparing(true);
     try {
       const compressed = await compressImageForUpload(blob);
       if (compressed.size > 2 * 1024 * 1024) {
-        setPhotoError('压缩后图片仍大于 2 MB，请换一张分辨率略低的照片。');
+        setPhotoError('压缩后图片仍大于 2 MB，请换一张照片。');
         return;
       }
-      if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
-      const url = URL.createObjectURL(compressed);
       setPhotoFile(compressed);
-      setPhotoPreviewUrl(url);
-      setPhotoInfo(`${sourceLabel} · ${(compressed.size / 1024).toFixed(0)} KB`);
+      setPhotoRecommendation(null);
+      setPhotoRecommendError(null);
       idemKeyRef.current = generateIdempotencyKey('card');
+      haptic('success');
     } catch {
-      setPhotoError('无法解码该文件，请上传 JPEG、PNG 或 WebP 照片。');
+      setPhotoError('浏览器无法读取这张照片，请尝试 JPEG、PNG 或 WebP。');
+    } finally {
+      setPhotoPreparing(false);
     }
-  };
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
-    if (file.type && !allowed.includes(file.type)) {
-      setPhotoError('仅支持 JPEG、PNG 或 WebP 格式的照片。');
-      return;
-    }
-    await acceptImageBlob(file, file.name);
   };
 
   const applyPersonaSelection = (targetIdOrMbti: string, suggestedMatIds?: string[]) => {
@@ -254,23 +207,22 @@ export function CreatePage() {
 
   const handleRecommend = async (source: 'photo' | 'quiz') => {
     if (recommending) return;
-    setRecommendError(null);
-    if (source === 'photo' && (!photoMbtiEnabled || !photoFile)) {
-      setRecommendError('请先在第 1 步上传或拍摄一张自拍，再使用 AI 气质分析。');
-      return;
-    }
+    const setError = source === 'photo' ? setPhotoRecommendError : setRecommendError;
+    setError(null);
+    if (source === 'photo' && (!photoMbtiEnabled || !photoFile || photoPreparing)) return;
 
     haptic('medium');
-    setRecommending(true);
+    setPendingAnalysis(source);
     try {
       const res = await api.recommendMbti(source === 'photo' ? { photo: photoFile } : { quizAnswers });
-      setRecommendation(res);
+      if (source === 'photo') setPhotoRecommendation(res);
+      else setRecommendation(res);
       applyPersonaSelection(res.primaryPersonaId, res.suggestedMaterialIds);
       haptic('success');
     } catch (err) {
-      setRecommendError(err instanceof Error ? err.message : '人格推荐分析失败，请稍后重试');
+      setError(err instanceof Error ? err.message : '人格推荐分析失败，请稍后重试');
     } finally {
-      setRecommending(false);
+      setPendingAnalysis(null);
     }
   };
 
@@ -353,165 +305,93 @@ export function CreatePage() {
     })).filter((g) => g.items.length > 0);
   }, [accessories]);
 
+  const renderPreparedDoll = () => {
+    if (!photoRecommendation || !activePersona) return null;
+    const reference = templates.find(template => template.recommendedMbti.includes(activePersona.mbti)) ??
+      templates.find(template => template.recommendedMbti.some(mbti =>
+        personas.find(persona => persona.mbti === mbti)?.mbtiGroup === activePersona.mbtiGroup
+      )) ?? templates[0];
+    const suggestedRole = photoRecommendation.primaryPersonaId === activePersona.id;
+    const materials = selectedAccessories.flatMap(id => {
+      const item = accessories.find(accessory => accessory.id === id);
+      return item ? [item] : [];
+    });
+    const roles = [...new Set([photoRecommendation.primaryMbti, ...photoRecommendation.alternateMbtis, activePersona.mbti])];
+    return (
+      <section ref={draftRef} aria-labelledby="doll-draft-title"
+        className="space-y-4 rounded-2xl border border-[#D8E6DF] bg-[#F3F8F4] p-4">
+        <div>
+          <h2 id="doll-draft-title" className="font-editorial text-lg font-semibold text-[#382A22]">娃娃方案已准备</h2>
+          <p className="mt-1 text-xs leading-relaxed text-[#6E5C50]">性格是娃娃的创作设定，可以按你的喜好调整。</p>
+        </div>
+        <div className="grid items-start gap-3 min-[440px]:grid-cols-[6rem_minmax(0,1fr)]">
+          {reference && (
+            <figure className="max-w-36">
+              <img src={reference.imageUrl} alt={reference.name} className="aspect-square w-full rounded-xl object-cover" />
+              <figcaption className="mt-1 text-[11px] text-[#6E5C50]">工坊参考样式</figcaption>
+            </figure>
+          )}
+          <div className="space-y-2">
+            <p className="text-sm font-semibold text-[#382A22]">{activePersona.name} · {activePersona.mbti}</p>
+            <p className="text-sm leading-relaxed text-[#524339]">{photoRecommendation.photoStyle}</p>
+            <p className="text-sm leading-relaxed text-[#524339]">
+              {suggestedRole ? photoRecommendation.dollDesign : activePersona.visualTrait || activePersona.materialHint}
+            </p>
+          </div>
+        </div>
+        {suggestedRole && <p className="text-xs leading-relaxed text-[#6E5C50]">{photoRecommendation.reason}</p>}
+        {materials.length > 0 && (
+          <ul aria-label="已准备的材料" className="flex flex-wrap gap-1.5">
+            {materials.map(material => (
+              <li key={material.id} className="rounded-full bg-white px-2.5 py-1 text-xs text-[#26544A]">{material.label}</li>
+            ))}
+          </ul>
+        )}
+        <div className="flex flex-wrap items-center gap-2" aria-label="调整娃娃性格">
+          <span className="text-xs text-[#6E5C50]">换个性格</span>
+          {roles.map(mbti => (
+            <button key={mbti} type="button" aria-pressed={activePersona.mbti === mbti}
+              className="btn-paper-soft min-h-8 px-2.5 text-xs font-mono aria-pressed:bg-[#D8EBE3]"
+              onClick={() => {
+                const persona = personas.find(item => item.mbti === mbti);
+                const items = mbti === photoRecommendation.primaryMbti
+                  ? photoRecommendation.suggestedMaterialIds
+                  : persona?.recommendedMaterials;
+                applyPersonaSelection(mbti, items);
+              }}>{mbti}</button>
+          ))}
+        </div>
+        {!creationEnabled && <p className="text-xs text-[#6E5C50]">完整定制出图待开放</p>}
+      </section>
+    );
+  };
+
+  const renderPortraitTools = () => (
+    <div className="space-y-4">
+      <PortraitCapture photoUrl={photoPreviewUrl} busy={photoPreparing || recommending || submitting}
+        onPhoto={acceptImageBlob} onClear={clearPhoto} />
+
+      {photoError && <p role="alert" className="text-xs text-[#9E3D2E]">{photoError}</p>}
+      {photoMbtiEnabled && photoFile && !photoRecommendation && (
+        <div className="space-y-2">
+          <button type="button" onClick={() => void handleRecommend('photo')}
+            disabled={photoPreparing || recommending || submitting}
+            className="btn-capsule-primary inline-flex min-h-10 items-center justify-center gap-2 px-4 text-sm font-medium disabled:opacity-55">
+            <Sparkles className="h-4 w-4" />
+            {pendingAnalysis === 'photo' ? '正在分析照片…' : '分析这张照片'}
+          </button>
+          <p className="text-xs leading-relaxed text-[#6E5C50]">确认后，将这张照片发送给阶跃星辰用于娃娃创作。</p>
+          {photoRecommendError && <p role="alert" className="text-xs text-[#9E3D2E]">{photoRecommendError}</p>}
+        </div>
+      )}
+      {renderPreparedDoll()}
+    </div>
+  );
+
   const renderPhotoAndNickname = () => (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-baseline gap-2">
-          <span className="font-atelier-num italic text-[14px] text-[#4A8276]">01.</span>
-          <h2 className="font-editorial text-base font-semibold text-[#382A22]">参考照片与称呼</h2>
-        </div>
-
-        <div className="flex items-center gap-3.5">
-          {(
-            [
-              { key: 'upload', label: '相册' },
-              { key: 'camera', label: '拍摄' },
-            ] as const
-          ).map((mode) => {
-            const active = photoSourceMode === mode.key;
-            return (
-              <button
-                key={mode.key}
-                type="button"
-                onClick={() => {
-                  haptic('selection');
-                  if (mode.key === 'upload') {
-                    stopCamera();
-                    setPhotoSourceMode('upload');
-                  } else {
-                    setPhotoSourceMode('camera');
-                    void startCamera();
-                  }
-                }}
-                className={`relative pb-1 text-xs font-medium transition-colors whitespace-nowrap ${
-                  active ? 'text-[#382A22]' : 'text-[#9A887B] hover:text-[#382A22]'
-                }`}
-              >
-                {mode.label}
-                {active && (
-                  <motion.span
-                    layoutId="photo-mode-ink"
-                    transition={{ type: 'spring', stiffness: 440, damping: 34 }}
-                    className="absolute left-0 right-0 -bottom-0.5 h-[2px] bg-[#4A8276]"
-                  />
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {photoPreviewUrl && !cameraActive ? (
-        <div className="space-y-2">
-          <div className="relative aspect-[16/10] lg:aspect-[4/3] rounded-2xl overflow-hidden border border-[#EAE2D6] bg-white p-1.5">
-            <img
-              src={photoPreviewUrl}
-              alt="待上传照片预览"
-              className="w-full h-full object-cover rounded-xl"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                haptic('light');
-                setPhotoFile(null);
-                setPhotoPreviewUrl(null);
-                setPhotoInfo(null);
-              }}
-              aria-label="移除照片"
-              className="absolute top-3 right-3 w-8 h-8 btn-orb-glass hover:text-[#B84A39] flex items-center justify-center"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="flex items-center justify-between text-[11px] text-[#9A887B]">
-            <span className="truncate">{photoInfo}</span>
-            <button
-              type="button"
-              onClick={() => {
-                if (photoSourceMode === 'camera') {
-                  void startCamera();
-                } else {
-                  setPhotoFile(null);
-                  setPhotoPreviewUrl(null);
-                }
-              }}
-              className="inline-flex items-center gap-1 font-medium btn-icon-ghost whitespace-nowrap shrink-0"
-            >
-              <RefreshCw className="w-3 h-3 text-[#4A8276]" />
-              <span>重选</span>
-            </button>
-          </div>
-        </div>
-      ) : photoSourceMode === 'camera' ? (
-        <div className="space-y-2.5">
-          <div className="aspect-[16/10] lg:aspect-[4/3] rounded-2xl overflow-hidden border border-[#EAE2D6] bg-[#2D241E] flex items-center justify-center relative">
-            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-            {!cameraActive && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center text-[#FAF7F2] text-xs space-y-2.5 bg-[#2D241E]/92">
-                <Camera className="w-5 h-5 opacity-80" />
-                <p className="max-w-[26ch] leading-relaxed text-[#E4DBCE]">
-                  {cameraError || '点击开启摄像头取景框'}
-                </p>
-                <button
-                  type="button"
-                  onClick={() => void startCamera()}
-                  className="px-4 py-1.5 rounded-full border border-[#FAF7F2]/55 text-[#FAF7F2] hover:bg-white/10 font-medium"
-                >
-                  打开摄像头
-                </button>
-              </div>
-            )}
-          </div>
-          {cameraActive && (
-            <div className="flex items-center gap-2.5">
-              <button
-                type="button"
-                onClick={() => void handleCaptureSnapshot()}
-                className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-medium btn-capsule-primary"
-              >
-                <Camera className="w-3.5 h-3.5" />
-                <span>拍摄照片</span>
-              </button>
-              <button
-                type="button"
-                onClick={stopCamera}
-                className="px-3.5 py-2 text-xs font-medium btn-icon-ghost"
-              >
-                取消
-              </button>
-            </div>
-          )}
-        </div>
-      ) : (
-        <label className="group photo-mat-frame block aspect-[16/10] lg:aspect-[4/3] rounded-2xl border border-dashed border-[#D3C6B4] specimen-stage-1 hover:border-[#4A8276] transition-all duration-300 cursor-pointer overflow-hidden">
-          <input
-            type="file"
-            accept="image/jpeg,image/png,image/webp"
-            onChange={handleFileChange}
-            className="sr-only"
-          />
-          <div className="relative z-10 w-full h-full flex flex-col items-center justify-center p-4 text-center space-y-2.5">
-            <div className="w-11 h-11 rounded-full bg-[#FFFDF9]/90 border border-[#D8CEC0] group-hover:border-[#4A8276] group-hover:bg-[#ECF5F2] shadow-[0_4px_12px_-4px_rgba(56,42,34,0.12)] flex items-center justify-center text-[#3D7267] transition-all duration-300 group-hover:-translate-y-0.5">
-              <Upload className="w-4 h-4" />
-            </div>
-            <div className="space-y-0.5">
-              <p className="font-editorial text-[14px] font-semibold text-[#382A22]">
-                点击上传参考照片
-              </p>
-              <p className="text-[11px] text-[#8E7C6E]">
-                支持 JPEG/PNG/WebP · 仅用于水彩形象与气质匹配，24h 自动清理
-              </p>
-            </div>
-          </div>
-        </label>
-      )}
-
-      {photoError && (
-        <p className="text-xs text-[#9E3D2E] bg-[#FDF2F0] border border-[#E5B8B0] rounded-lg px-3 py-2">
-          {photoError}
-        </p>
-      )}
-
+      <h2 className="font-editorial text-base font-semibold text-[#382A22]">参考照片与称呼</h2>
+      {renderPortraitTools()}
       {/* Nickname input right below photo */}
       <div className="space-y-1.5 pt-2 border-t border-[#EFE7DC]">
         <div className="flex items-center justify-between gap-2">
@@ -620,20 +500,8 @@ export function CreatePage() {
         <div className="space-y-3.5">
           <div className="p-3 rounded-2xl bg-[#F7F3EB]/90 border border-[#E6DDD0] space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 text-xs font-medium text-[#382A22]">
-                <Wand2 className="w-3.5 h-3.5 text-[#4A8276]" />
-                <span>{photoMbtiEnabled ? '选择 MBTI 或参考照片' : '选择 MBTI，或使用 4 题快测'}</span>
-              </div>
+              <span className="text-xs font-medium text-[#382A22]">选择喜欢的娃娃性格</span>
               <div className="flex items-center gap-2">
-                {photoMbtiEnabled && <button
-                  type="button"
-                  disabled={recommending || !photoFile}
-                  onClick={() => void handleRecommend('photo')}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11.5px] font-medium btn-ink-tinted disabled:opacity-45 whitespace-nowrap"
-                >
-                  <Sparkles className="w-3 h-3 text-[#4A8276]" />
-                  <span>{recommending ? '分析中…' : 'AI 看自拍参考'}</span>
-                </button>}
                 <button
                   type="button"
                   onClick={() => {
@@ -658,7 +526,7 @@ export function CreatePage() {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs font-mono font-bold text-[#2D6458] bg-[#E8F4F0] px-2 py-0.5 rounded-md">
-                      自拍推荐 {recommendation.primaryMbti}
+                      问答推荐 {recommendation.primaryMbti}
                     </span>
                     {recommendation.keywords.map((kw) => (
                       <span
@@ -832,7 +700,7 @@ export function CreatePage() {
         <span>
           照片：
           <strong className={photoFile ? 'text-[#4A8276]' : 'text-[#B84A39]'}>
-            {photoFile ? '已上传' : '未上传'}
+            {photoFile ? '已选取' : '待选取'}
           </strong>
         </span>
         <span aria-hidden="true">·</span>
@@ -860,14 +728,25 @@ export function CreatePage() {
       <div className="mx-auto max-w-2xl space-y-4 px-4 py-6">
         <section className="studio-card space-y-2 rounded-[20px] p-5">
           <h1 className="font-editorial text-xl font-semibold text-[#382A22]">
-            {creationEnabled ? '定制工坊暂时不可用' : '照片定制 · 待开放'}
+            {loadError ? '定制工坊暂时不可用' : photoMbtiEnabled ? '拍照准备娃娃' : '照片定制 · 待开放'}
           </h1>
           {loadError
             ? <p role="alert" className="text-sm text-[#6E5C50]">{loadError}</p>
-            : <p className="text-sm text-[#6E5C50]">可以先测果壳娃娃人格，或去展馆和演示娃娃聊天。</p>}
+            : <p className="text-sm text-[#6E5C50]">
+                {photoMbtiEnabled ? '在设备上实时取景，选好照片后准备娃娃的性格、配色和配饰。' : '可以先测果壳娃娃人格，或去展馆和演示娃娃聊天。'}
+              </p>}
           <Link to="/plaza" className="inline-block text-sm font-medium text-[#3D7267]">逛果壳展馆</Link>
         </section>
-        {!loadError && <section className="studio-card rounded-[20px] p-5">{renderPersonaStep()}</section>}
+        {!loadError && photoMbtiEnabled && (
+          <section className="studio-card rounded-[20px] p-4 sm:p-5">{renderPortraitTools()}</section>
+        )}
+        {!loadError && (photoMbtiEnabled ? (
+          <details className="studio-card rounded-[20px] p-4 sm:p-5"
+            onToggle={event => { if (event.currentTarget.open) setPersonaToolsOpened(true); }}>
+            <summary className="cursor-pointer text-sm font-medium text-[#3D7267]">通过问答挑选性格</summary>
+            {personaToolsOpened && <div className="mt-4">{renderPersonaStep()}</div>}
+          </details>
+        ) : <section className="studio-card rounded-[20px] p-5">{renderPersonaStep()}</section>)}
       </div>
     );
   }
@@ -918,7 +797,7 @@ export function CreatePage() {
         {/* Mobile One-Screen Step Card (rendered only on <1024px so AI Guide mounts once & preserves progress) */}
         {!isDesktop && (
           <div className="studio-card rounded-[20px] p-4 space-y-4">
-            <div className={step === 1 ? 'block' : 'hidden'}>{renderPhotoAndNickname()}</div>
+            {step === 1 && renderPhotoAndNickname()}
             <div className={step === 2 ? 'block' : 'hidden'}>{renderPersonaStep()}</div>
             <div className={step === 3 ? 'block' : 'hidden'}>{renderAccessoriesStep()}</div>
 
@@ -960,7 +839,7 @@ export function CreatePage() {
               ) : (
                 <button
                   type="submit"
-                  disabled={submitting || !photoFile || !userNickname.trim()}
+                  disabled={submitting || photoPreparing || recommending || !photoFile || !userNickname.trim()}
                   className="flex-1 inline-flex items-center justify-center px-5 py-2.5 text-sm font-medium btn-capsule-primary whitespace-nowrap"
                 >
                   {submitting ? '正在创建绘制任务…' : '开始生成果壳形象'}
@@ -982,7 +861,7 @@ export function CreatePage() {
               )}
               <button
                 type="submit"
-                disabled={submitting || !photoFile || !userNickname.trim()}
+                disabled={submitting || photoPreparing || recommending || !photoFile || !userNickname.trim()}
                 className="w-full inline-flex items-center justify-center px-6 py-3 text-sm font-medium btn-capsule-primary whitespace-nowrap"
               >
                 {submitting ? '正在创建绘制任务…' : '开始生成果壳形象'}

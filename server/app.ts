@@ -9,7 +9,7 @@ import apiRouter from './routes/api.ts';
 
 const requireCreationOpen: RequestHandler = (req, res, next) => {
   if (config.imageGenerationEnabled) return next();
-  sendError(req, res, 403, 'CREATION_CLOSED', '照片定制和生图暂未开放');
+  sendError(req, res, 403, 'CREATION_CLOSED', '完整定制出图暂未开放');
 };
 
 const requirePhotoMbtiForMultipart: RequestHandler = (req, res, next) => {

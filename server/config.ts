@@ -83,7 +83,7 @@ export function isChatCloudConfigured(): boolean {
 }
 
 export function isPhotoMbtiEnabled(): boolean {
-  return config.imageGenerationEnabled && Boolean(config.stepfunVisionModel) && isChatCloudConfigured();
+  return Boolean(config.stepfunVisionModel) && isChatCloudConfigured();
 }
 
 export function isImageCloudConfigured(vendor: ImageVendor): boolean {

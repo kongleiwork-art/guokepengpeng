@@ -65,6 +65,8 @@ export interface MbtiRecommendation {
   keywords: string[];
   reason: string;
   suggestedMaterialIds: string[];
+  photoStyle?: string;
+  dollDesign?: string;
   source: 'cloud_vision' | 'cloud_quiz' | 'quiz_rule';
 }
 

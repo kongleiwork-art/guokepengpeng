@@ -564,29 +564,32 @@ export async function streamDollChat(
  * Compress & EXIF-normalize a photo on the client canvas so it stays <= 2 MB and upright.
  */
 export async function compressImageForUpload(file: Blob): Promise<File> {
-  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(async () => {
-    return createImageBitmap(file);
-  });
-
-  const maxSide = 1280;
-  let width = bitmap.width;
-  let height = bitmap.height;
-  if (width > maxSide || height > maxSide) {
-    const ratio = Math.min(maxSide / width, maxSide / height);
-    width = Math.round(width * ratio);
-    height = Math.round(height * ratio);
-  }
-
+  const bitmap = typeof createImageBitmap === 'function'
+    ? await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => null)
+    : null;
+  const image = bitmap ? null : new Image();
+  const sourceUrl = image ? URL.createObjectURL(file) : null;
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    bitmap.close();
-    throw new Error('浏览器画布初始化失败');
+  try {
+    if (image && sourceUrl) {
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error('浏览器无法读取这张照片'));
+        image.src = sourceUrl;
+      });
+    }
+    const width = bitmap?.width ?? image!.naturalWidth;
+    const height = bitmap?.height ?? image!.naturalHeight;
+    const scale = Math.min(1, 1280 / Math.max(width, height));
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('浏览器画布初始化失败');
+    ctx.drawImage(bitmap ?? image!, 0, 0, canvas.width, canvas.height);
+  } finally {
+    bitmap?.close();
+    if (sourceUrl) URL.revokeObjectURL(sourceUrl);
   }
-  ctx.drawImage(bitmap, 0, 0, width, height);
-  bitmap.close();
 
   const qualities = [0.86, 0.72, 0.58];
   for (const q of qualities) {

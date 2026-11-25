@@ -132,7 +132,7 @@ test('Gemini 参考图创作、绑定与首次初始化后重启', { timeout: 30
 });
 test('公开预览在接收照片前关闭创作，NFC 入口直达聊天', { timeout: 20000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'nutshell-preview-'));
-  const { base } = await startApp(t, dir, { IMAGE_GENERATION_ENABLED: 'false' });
+  const { base } = await startApp(t, dir, { IMAGE_GENERATION_ENABLED: 'false', STEPFUN_VISION_MODEL: '' });
   t.after(() => rm(dir, { recursive: true, force: true }));
 
   assert.deepEqual(await json(await fetch(base + '/api/capabilities')), {
@@ -165,6 +165,58 @@ test('公开预览在接收照片前关闭创作，NFC 入口直达聊天', { ti
     body: JSON.stringify({ quizAnswers: { energy: 'E', perception: 'N', judgment: 'F', lifestyle: 'P' } }),
   }));
   assert.equal(quiz.primaryMbti, 'ENFP');
+});
+
+test('预览支持单张照片分析和娃娃方案，同时保留生图限制', { timeout: 20000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'nutshell-photo-analysis-'));
+  const requests = [];
+  const provider = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks)));
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      primaryMbti: 'INFP',
+      alternateMbtis: ['ENFP', 'ISFP'],
+      keywords: ['暖色', '安静'],
+      reason: '暖色组合适合故事收藏家的角色设定。',
+      photoStyle: '画面有暖棕与浅米色。',
+      dollDesign: '以天然胡桃壳和浅色毛线搭出温暖的森林娃娃。',
+      suggestedMaterialIds: ['absent_material'],
+    }) } }] }));
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  t.after(() => new Promise(resolve => provider.close(resolve)));
+  const { base } = await startApp(t, dir, {
+    IMAGE_GENERATION_ENABLED: 'false',
+    CHAT_PROVIDER: 'cloud',
+    STEPFUN_API_KEY: 'fixture',
+    STEPFUN_API_BASE: 'http://127.0.0.1:' + provider.address().port + '/v1',
+    STEPFUN_VISION_MODEL: 'step-5-preview',
+  });
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  assert.deepEqual(await json(await fetch(base + '/api/capabilities')), {
+    imageGenerationEnabled: false, photoMbtiEnabled: true,
+  });
+  const form = new FormData();
+  form.set('photo', new Blob([photo], { type: 'image/jpeg' }), 'frame.jpg');
+  const brief = await json(await fetch(base + '/api/mbti/recommend', { method: 'POST', body: form }));
+  assert.equal(brief.source, 'cloud_vision');
+  assert.equal(brief.primaryPersonaId, 'persona_infp');
+  assert.match(brief.photoStyle, /暖棕/);
+  assert.match(brief.dollDesign, /胡桃壳/);
+  assert.ok(brief.suggestedMaterialIds.length > 0);
+  assert.ok(!brief.suggestedMaterialIds.includes('absent_material'));
+  assert.equal(requests[0].model, 'step-5-preview');
+  const submittedImage = requests[0].messages[1].content.find(part => part.type === 'image_url');
+  assert.equal(submittedImage.image_url.url, 'data:image/jpeg;base64,' + photo.toString('base64'));
+
+  const closed = await fetch(base + '/api/cards', { method: 'POST', body: form });
+  assert.equal(closed.status, 403);
+  assert.equal((await closed.json()).error.code, 'CREATION_CLOSED');
+  assert.equal(requests.length, 1);
 });
 
 test('StepFun SSE、GPT 参考图、会话隔离和任务幂等', { timeout: 30000 }, async (t) => {

@@ -15,6 +15,7 @@
   "dependencies": {
     "@google/genai": "^3.6.1",
     "@libsql/client": "^0.18.0",
+    "@mediapipe/tasks-vision": "0.10.32",
     "@tailwindcss/vite": "^4.3.3",
     "@types/cookie-parser": "^1.4.10",
     "@types/multer": "^2.3.0",

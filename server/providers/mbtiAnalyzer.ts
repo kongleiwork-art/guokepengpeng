@@ -17,6 +17,8 @@ export interface MbtiRecommendationResult {
   keywords: string[];
   reason: string;
   suggestedMaterialIds: string[];
+  photoStyle?: string;
+  dollDesign?: string;
   source: 'cloud_vision' | 'cloud_quiz' | 'quiz_rule';
 }
 
@@ -100,21 +102,21 @@ export async function recommendMbti(input: {
   }
 
   const personaCatalog = PERSONA_SEEDS.map(
-    (p) => `${p.mbti}（${p.name}，${p.cognitiveAxis}）：${p.tagline}`
+    (p) => hasPhoto ? `${p.mbti} ${p.name}` : `${p.mbti}（${p.name}，${p.cognitiveAxis}）：${p.tagline}`
   ).join('\n');
 
   const materialsCatalog = input.inStockMaterials
-    .map((m) => `${m.id}: ${m.label}（${m.material}）`)
+    .map((m) => hasPhoto ? `${m.id}=${m.label}` : `${m.id}: ${m.label}（${m.material}）`)
     .join('\n');
 
   const quizDesc = hasQuiz && input.quizAnswers
     ? `用户 4 题快测选择：能量倾向=${input.quizAnswers.energy || '未选'}，感知方式=${input.quizAnswers.perception || '未选'}，决策方式=${input.quizAnswers.judgment || '未选'}，生活节奏=${input.quizAnswers.lifestyle || '未选'}。`
-    : '用户未填写 4 题快测，仅提供照片气质作为手作娃娃人格灵感参考。';
+    : '将照片的可见风格作为虚构娃娃的角色灵感。';
 
   const promptText = [
     '你是“果壳碰碰”手作工坊的 MBTI 人格策展师。',
     hasPhoto
-      ? '请以温暖、有趣、尊重的方式观察这张照片中的穿搭风格、色彩氛围、表情神态与气质（不做任何外貌评判或身份推断，仅将其转化为天然果实手作娃娃的性格灵感）。'
+      ? '观察照片中可见的服饰、色彩和画面氛围，将它们转成虚构娃娃的风格。MBTI 描述娃娃角色，勿据外貌判断真人性格、身份、年龄或健康。'
       : '请结合用户的 4 题快测倾向，为其挑选最契合的天然果实手作娃娃 MBTI 人格。',
     quizDesc,
     '',
@@ -130,12 +132,16 @@ export async function recommendMbti(input: {
     '3. keywords 返回 3 个简短温暖的中文氛围词（每个 2–5 字）。',
     '4. reason 用 2 句自然、有手作温度的中文解释为什么这个果壳人格和Ta很搭。',
     '5. suggestedMaterialIds 必须严格从上面列出的在库材料 ID 中挑选 2–3 个。',
+    hasPhoto ? '6. photoStyle 简短描述照片中最明显的可见风格。dollDesign 用一句话构思娃娃的主体、配色与在库配饰。reason 说明为何选择这种娃娃角色。' : '',
   ].join('\n');
 
   const content = hasPhoto
     ? [
         { type: 'text' as const, text: promptText },
-        { type: 'image_url' as const, image_url: { url: `data:${input.photoMime};base64,${input.photoBuffer!.toString('base64')}` } },
+        { type: 'image_url' as const, image_url: {
+          url: `data:${input.photoMime};base64,${input.photoBuffer!.toString('base64')}`,
+          detail: 'low' as const,
+        } },
       ]
     : promptText;
   const outcome = await requestStepFunJson<{
@@ -144,8 +150,11 @@ export async function recommendMbti(input: {
     keywords?: string[];
     reason?: string;
     suggestedMaterialIds?: string[];
+    photoStyle?: string;
+    dollDesign?: string;
   }>(
-    '只返回一个 JSON 对象，包含 primaryMbti、alternateMbtis、keywords、reason、suggestedMaterialIds。',
+    '只返回一个 JSON 对象，包含 primaryMbti、alternateMbtis、keywords、reason、suggestedMaterialIds。' +
+      (hasPhoto ? '照片分析还要包含 photoStyle 和 dollDesign。' : ''),
     content,
     hasPhoto ? config.stepfunVisionModel : undefined,
   ).then((data) => ({ data })).catch((error) => {
@@ -155,7 +164,15 @@ export async function recommendMbti(input: {
   if ('fallback' in outcome) return outcome.fallback;
 
   const parsed = outcome.data;
-  const primary = personaByMbti(parsed.primaryMbti || '');
+  const chosenMbti = typeof parsed.primaryMbti === 'string' ? parsed.primaryMbti.trim().toUpperCase() : '';
+  const photoStyle = typeof parsed.photoStyle === 'string' ? parsed.photoStyle.trim().slice(0, 120) : '';
+  const dollDesign = typeof parsed.dollDesign === 'string' ? parsed.dollDesign.trim().slice(0, 180) : '';
+  if (hasPhoto && (!VALID_MBTIS.has(chosenMbti) || !photoStyle || !dollDesign)) {
+    throw Object.assign(new Error('照片分析返回的娃娃方案不完整，请重试'), {
+      status: 502, code: 'PROVIDER_ERROR',
+    });
+  }
+  const primary = personaByMbti(chosenMbti);
   const inStockSet = new Set(input.inStockMaterials.map((m) => m.id));
 
   const validAlts = (Array.isArray(parsed.alternateMbtis) ? parsed.alternateMbtis : [])
@@ -187,8 +204,9 @@ export async function recommendMbti(input: {
     primaryPersonaId: primary.id,
     alternateMbtis: validAlts.slice(0, 2),
     keywords: keywords.length > 0 ? keywords : [primary.mbti, primary.name, '手作共鸣'],
-    reason: (parsed.reason || primary.tagline).trim().slice(0, 240),
+    reason: (typeof parsed.reason === 'string' && parsed.reason.trim() || primary.tagline).slice(0, 240),
     suggestedMaterialIds: validMaterials,
+    ...(hasPhoto ? { photoStyle, dollDesign } : {}),
     source: hasPhoto ? 'cloud_vision' : 'cloud_quiz',
   };
 }

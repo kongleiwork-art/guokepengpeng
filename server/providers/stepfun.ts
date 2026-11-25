@@ -2,12 +2,19 @@ import { config } from '../config.ts';
 
 type ContentPart =
   | { type: 'text'; text: string }
-  | { type: 'image_url'; image_url: { url: string } };
+  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' } };
 
 type Message = { role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] };
 
 export function requestStepFun(
-  body: { model?: string; messages: Message[]; stream?: boolean; max_tokens: number; response_format?: { type: 'json_object' } },
+  body: {
+    model?: string;
+    messages: Message[];
+    stream?: boolean;
+    max_tokens: number;
+    response_format?: { type: 'json_object' };
+    reasoning_effort?: 'low';
+  },
   signal: AbortSignal,
 ) {
   return fetch(config.chatApiBase + '/chat/completions', {
@@ -35,12 +42,20 @@ export function stepFunError(status: number) {
 }
 
 export async function requestStepFunJson<T>(system: string, user: Message['content'], model?: string): Promise<T> {
+  const hasImage = Array.isArray(user);
+  const useLowEffort = hasImage && (model === 'step-3.7-flash' || model === 'step-5-preview');
   const response = await requestStepFun({
     ...(model ? { model } : {}),
+    ...(useLowEffort ? { reasoning_effort: 'low' as const } : {}),
     messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
     response_format: { type: 'json_object' },
-    max_tokens: 2300,
-  }, AbortSignal.timeout(25000));
+    max_tokens: hasImage ? 3600 : 2300,
+  }, AbortSignal.timeout(hasImage ? 38_000 : 25_000)).catch((error: unknown) => {
+    const timedOut = error instanceof Error && error.name === 'TimeoutError';
+    throw Object.assign(new Error(timedOut ? '阶跃星辰分析超时，请重试' : '暂时无法连接阶跃星辰，请重试'), {
+      code: timedOut ? 'PROVIDER_TIMEOUT' : 'PROVIDER_ERROR', status: timedOut ? 504 : 502,
+    });
+  });
   if (!response.ok) throw stepFunError(response.status);
 
   const payload = await response.json();

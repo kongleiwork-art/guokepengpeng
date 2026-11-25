@@ -25,9 +25,12 @@ Vite 构建前端。Express API 和 NFC 跳转运行在 Vercel Functions。预�
 | `SESSION_SECRET` | 会话与队列消息的签名密钥，预览内固定以支持跨部署恢复 |
 | `DEMO_ADMIN_TOKEN` | `/dev` 工坊管理密钥 |
 | `STEPFUN_API_KEY`、`STEPFUN_CHAT_MODEL` | 阶跃星辰流式对话、四题快测和自适应访谈 |
+| `STEPFUN_VISION_MODEL` | 照片分析使用的阶跃星辰视觉模型，预览使用 `step-5-preview` |
 | `PREVIEW_APP_URL` | 固定 HTTPS 预览地址，用于测试贴纸和角色分享链接 |
 
-通过 `/api/health` 检查后端就绪情况。公开预览的 `/create` 显示「照片定制 · 待开放」。后端在解析照片前关闭上传和重生成。
+通过 `/api/health` 检查后端就绪情况。预览的 `/create` 可在设备端实时识别人像并自动抓拍。确认后发送一张照片给阶跃星辰，准备娃娃的角色、配色和配饰。完整定制出图由 `IMAGE_GENERATION_ENABLED` 控制。
+
+取景使用 [MediaPipe Face Detector](https://developers.google.com/edge/mediapipe/solutions/vision/face_detector?tab=Web)。模型和运行文件随站点发布。
 
 开放定制的环境使用 `OPENAI_API_KEY` 配置 GPT Image。工坊人员可在 `/dev` 手动切换至 Nano Banana，凭据使用 `GEMINI_API_KEY`。任务保存提交时的模型与质量档位。远程结果未知时，核对服务商的结果与费用后方可继续提交。原始照片保留 24 小时，已生成的作品按作品权限读取。
 
