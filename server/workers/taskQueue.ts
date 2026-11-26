@@ -15,6 +15,7 @@ function signTask(task: Task): Buffer {
 export function publishTask(task: Task, delaySeconds = 0) {
   const envelope: Envelope = { task, signature: signTask(task).toString('base64url') };
   return send(TASK_TOPIC, envelope, {
+    region: 'hnd1',
     idempotencyKey: task.kind + ':' + task.id,
     delaySeconds,
     retentionSeconds: delaySeconds + 24 * 60 * 60,

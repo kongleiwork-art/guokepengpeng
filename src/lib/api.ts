@@ -25,6 +25,7 @@ import type {
   RuntimeSettings,
   SessionInfo,
 } from './types';
+import { isVisitorKey } from './visitorKey.ts';
 
 export class ApiError extends Error {
   code: string;
@@ -40,26 +41,26 @@ export class ApiError extends Error {
 }
 
 const VISITOR_KEY_STORAGE = 'nutshell_visitor_key_v1';
+let temporaryVisitorKey: string | undefined;
 
-/**
- * Persistent browser-local visitor key paired with signed HttpOnly cookies
- * so repeated NFC taps on mobile Safari / Chrome / WeChat never lose memories.
- */
-export function getOrCreateVisitorKey(): string {
+function getOrCreateVisitorKey(): string | undefined {
   try {
     const existing = localStorage.getItem(VISITOR_KEY_STORAGE);
-    if (existing && /^[a-zA-Z0-9_-]{12,80}$/.test(existing)) {
-      return existing;
-    }
-    const generated =
-      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? `vk_${crypto.randomUUID().replace(/-/g, '')}`
-        : `vk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
-    localStorage.setItem(VISITOR_KEY_STORAGE, generated);
-    return generated;
+    if (existing && isVisitorKey(existing)) return existing;
   } catch {
-    return 'vk_ephemeral_fallback_0001';
+    // Use a separate in-memory key when the browser blocks persistent storage.
   }
+  if (!globalThis.crypto?.getRandomValues) return undefined;
+  if (!temporaryVisitorKey) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    temporaryVisitorKey = 'vk_' + Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+  try {
+    localStorage.setItem(VISITOR_KEY_STORAGE, temporaryVisitorKey);
+  } catch {
+    // The signed cookie can preserve the session after reload.
+  }
+  return temporaryVisitorKey;
 }
 
 export function generateIdempotencyKey(prefix = 'idem'): string {
@@ -72,7 +73,8 @@ export function generateIdempotencyKey(prefix = 'idem'): string {
 async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (!headers.has('X-Visitor-Key')) {
-    headers.set('X-Visitor-Key', getOrCreateVisitorKey());
+    const visitorKey = getOrCreateVisitorKey();
+    if (visitorKey) headers.set('X-Visitor-Key', visitorKey);
   }
 
   const res = await fetch(url, {
@@ -103,8 +105,8 @@ export const api = {
     return requestJson<{ imageGenerationEnabled: boolean; photoMbtiEnabled: boolean }>('/api/capabilities');
   },
 
-  initSession(): Promise<SessionInfo> {
-    return requestJson<SessionInfo>('/api/session', { method: 'POST' });
+  initSession(signal?: AbortSignal): Promise<SessionInfo> {
+    return requestJson<SessionInfo>('/api/session', { method: 'POST', signal });
   },
 
   createSessionClaimCode(): Promise<{ code: string; expiresAt: string; sessionId: string }> {
@@ -131,8 +133,8 @@ export const api = {
     return requestJson<AccessoryOption[]>('/api/accessories');
   },
 
-  listTemplates(): Promise<FallbackTemplate[]> {
-    return requestJson<FallbackTemplate[]>('/api/templates');
+  listTemplates(signal?: AbortSignal): Promise<FallbackTemplate[]> {
+    return requestJson<FallbackTemplate[]>('/api/templates', { signal });
   },
 
   recommendMbti(input: { photo?: File | null; quizAnswers?: MbtiQuizAnswers }): Promise<MbtiRecommendation> {
@@ -211,8 +213,8 @@ export const api = {
     return requestJson<CardSummary[]>('/api/cards');
   },
 
-  getCard(cardId: string): Promise<CardDetail> {
-    return requestJson<CardDetail>(`/api/cards/${encodeURIComponent(cardId)}`);
+  getCard(cardId: string, signal?: AbortSignal): Promise<CardDetail> {
+    return requestJson<CardDetail>(`/api/cards/${encodeURIComponent(cardId)}`, { signal });
   },
 
   getCardVersion(versionId: string): Promise<CardVersion> {
@@ -313,9 +315,9 @@ export const api = {
     });
   },
 
-  listPlotJobs(cardId?: string): Promise<OutputJob[]> {
+  listPlotJobs(cardId?: string, signal?: AbortSignal): Promise<OutputJob[]> {
     const q = cardId ? `?cardId=${encodeURIComponent(cardId)}` : '';
-    return requestJson<OutputJob[]>(`/api/plot/jobs${q}`);
+    return requestJson<OutputJob[]>(`/api/plot/jobs${q}`, { signal });
   },
 
   getPlotJob(jobId: string): Promise<OutputJob> {
@@ -486,14 +488,13 @@ export async function streamDollChat(
   callbacks: StreamChatCallbacks,
   signal?: AbortSignal
 ): Promise<void> {
+  const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'text/event-stream' });
+  const visitorKey = getOrCreateVisitorKey();
+  if (visitorKey) headers.set('X-Visitor-Key', visitorKey);
   const res = await fetch(`/api/dolls/${encodeURIComponent(dollId)}/chat`, {
     method: 'POST',
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-      'X-Visitor-Key': getOrCreateVisitorKey(),
-    },
+    headers,
     body: JSON.stringify(payload),
     signal,
   });
@@ -517,46 +518,34 @@ export async function streamDollChat(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let currentEvent = 'message';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() ?? '';
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const blocks = buffer.split('\n\n');
-    buffer = blocks.pop() ?? '';
-
-    for (const block of blocks) {
-      const lines = block.split('\n');
-      let eventName = currentEvent;
-      let dataStr = '';
-
-      for (const line of lines) {
-        if (line.startsWith('event:')) {
-          eventName = line.slice(6).trim();
-        } else if (line.startsWith('data:')) {
-          dataStr += line.slice(5).trim();
+      for (const block of blocks) {
+        const lines = block.split(/\r?\n/);
+        const event = lines.find(line => line.startsWith('event:'))?.slice(6).trim();
+        const data = lines.filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+        if (!data) continue;
+        let parsed;
+        try { parsed = JSON.parse(data); } catch { continue; }
+        if (event === 'meta') callbacks.onMeta?.(parsed);
+        if (event === 'delta') callbacks.onDelta(parsed.text || '');
+        if (event === 'done' || event === 'error') {
+          if (event === 'done') callbacks.onDone(parsed);
+          else callbacks.onError(parsed);
+          await reader.cancel().catch(() => {});
+          return;
         }
       }
-
-      if (!dataStr) continue;
-      try {
-        const parsed = JSON.parse(dataStr);
-        if (eventName === 'meta') {
-          callbacks.onMeta?.(parsed);
-        } else if (eventName === 'delta') {
-          callbacks.onDelta(parsed.text || '');
-        } else if (eventName === 'done') {
-          callbacks.onDone(parsed);
-        } else if (eventName === 'error') {
-          callbacks.onError(parsed);
-        }
-      } catch {
-        // Ignore malformed SSE fragment
-      }
-      currentEvent = 'message';
     }
+    if (!signal?.aborted) callbacks.onError({ code: 'CHAT_INTERRUPTED', message: '回复连接已中断，可以重试这条消息' });
+  } finally {
+    reader.releaseLock();
   }
 }
 

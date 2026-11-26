@@ -223,7 +223,8 @@ export function CreatePage() {
       applyPersonaSelection(res.primaryPersonaId, res.suggestedMaterialIds);
       haptic('success');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '人格推荐分析失败，请稍后重试');
+      const connectionMessage = source === 'photo' ? '连接中断，照片已保留。联网后可重试分析' : '连接中断，联网后可重试测评';
+      setError(err instanceof ApiError ? err.message : connectionMessage);
     } finally {
       setPendingAnalysis(null);
     }
@@ -440,10 +441,19 @@ export function CreatePage() {
             disabled={photoPreparing || recommending || submitting}
             className="btn-capsule-primary inline-flex min-h-10 items-center justify-center gap-2 px-4 text-sm font-medium disabled:opacity-55">
             <Sparkles className="h-4 w-4" />
-            {pendingAnalysis === 'photo' ? '正在分析照片…' : '分析这张照片'}
+            {pendingAnalysis === 'photo' ? '正在分析照片…' : photoRecommendError ? '重试分析' : '分析这张照片'}
           </button>
           <p className="text-xs leading-relaxed text-[#6E5C50]">确认后，将这张照片发送给阶跃星辰用于娃娃创作。</p>
-          {photoRecommendError && <p role="alert" className="text-xs text-[#9E3D2E]">{photoRecommendError}</p>}
+          {photoRecommendError && (
+            <div className="space-y-2">
+              <p role="alert" className="text-xs text-[#9E3D2E]">{photoRecommendError}</p>
+              {creationEnabled && !isDesktop && (
+                <button type="button" onClick={() => setStep(2)} className="btn-paper-soft min-h-9 px-3 text-xs">
+                  继续手动选性格
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

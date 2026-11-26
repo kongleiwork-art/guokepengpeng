@@ -107,7 +107,8 @@ export function DollProfilePage() {
       const res = await api.createSessionClaimCode();
       setClaimCode(res.code);
       haptic('success');
-      setClaimStatus('口令 24 小时有效，在 Safari / 微信等其他浏览器输入即可同步全部记忆。');
+      const expiry = new Date(res.expiresAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      setClaimStatus(`口令有效至 ${expiry}，使用一次后失效。请在你自己的另一台设备或浏览器输入。`);
     } catch (err) {
       setClaimStatus(err instanceof Error ? err.message : '生成记忆口令失败');
     } finally {

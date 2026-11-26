@@ -13,7 +13,7 @@ import {
   Trash2,
   WifiOff,
 } from 'lucide-react';
-import { api, generateIdempotencyKey, streamDollChat } from '../lib/api';
+import { api, ApiError, generateIdempotencyKey, streamDollChat } from '../lib/api';
 import type { ChatMessage, DollDetail, MemoryItem } from '../lib/types';
 import { SafeImage } from '../components/SafeImage';
 import { WatercolorChatSkeleton } from '../components/WatercolorLoader';
@@ -53,6 +53,8 @@ export function DollChatPage() {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
+  const loadedDollId = useRef<string | null>(null);
+  const loadRevision = useRef(0);
 
   const [inputText, setInputText] = useState('');
   const [rememberToggle, setRememberToggle] = useState(false);
@@ -63,6 +65,7 @@ export function DollChatPage() {
     message: string;
     retryClientMessageId?: string;
     retryText?: string;
+    retryRememberText?: string;
   } | null>(null);
 
   const [newMemType, setNewMemType] = useState<'user_nickname' | 'fact'>('fact');
@@ -91,17 +94,6 @@ export function DollChatPage() {
   } = useChatMemoryBubbles(messages, memories, doll);
 
   useEffect(() => {
-    const onOnline = () => setIsOffline(false);
-    const onOffline = () => setIsOffline(true);
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
-    return () => {
-      window.removeEventListener('online', onOnline);
-      window.removeEventListener('offline', onOffline);
-    };
-  }, []);
-
-  useEffect(() => {
     autoVoiceRef.current = autoVoice;
   }, [autoVoice]);
 
@@ -120,61 +112,69 @@ export function DollChatPage() {
     saveChatDayPhaseMode(next);
   };
 
-  const cacheKey = `nutshell_chat_snapshot_${dollId}`;
+  const cacheKey = `nutshell_doll_snapshot_${dollId}`;
 
   const loadData = async () => {
+    const revision = ++loadRevision.current;
     setLoading(true);
     setPageError(null);
+    try { localStorage.removeItem(`nutshell_chat_snapshot_${dollId}`); } catch { /* Storage can be disabled. */ }
     try {
       const [d, msgRes, mems] = await Promise.all([
         api.getDoll(dollId),
         api.getMessages(dollId, 60),
         api.getMemories(dollId),
       ]);
+      if (loadRevision.current !== revision) return;
+      loadedDollId.current = dollId;
       setDoll(d);
       setMessages(msgRes.items);
       setMemories(mems);
+      setIsOffline(false);
       try {
-        localStorage.setItem(
-          cacheKey,
-          JSON.stringify({ doll: d, messages: msgRes.items.slice(-20), memories: mems })
-        );
+        localStorage.setItem(cacheKey, JSON.stringify({ ...d, isOwner: false, cardUrl: null, cardId: null }));
       } catch {
         // Ignore storage quota issues
       }
     } catch (err) {
-      // Offline graceful degradation: restore cached doll & recent messages if available
-      try {
-        const cachedRaw = localStorage.getItem(cacheKey);
-        if (cachedRaw) {
-          const cached = JSON.parse(cachedRaw) as {
-            doll?: DollDetail;
-            messages?: ChatMessage[];
-            memories?: MemoryItem[];
-          };
-          if (cached.doll) {
-            setDoll(cached.doll);
-            setMessages(cached.messages ?? []);
-            setMemories(cached.memories ?? []);
+      if (loadRevision.current !== revision) return;
+      if (err instanceof TypeError || (err instanceof ApiError && err.status >= 500)) {
+        if (loadedDollId.current === dollId) {
+          setIsOffline(true);
+          return;
+        }
+        try {
+          const cachedRaw = localStorage.getItem(cacheKey);
+          const cached = cachedRaw ? JSON.parse(cachedRaw) as DollDetail : null;
+          if (cached?.id === dollId) {
+            setDoll(cached);
+            setMessages([]);
+            setMemories([]);
             setIsOffline(true);
-            setLoading(false);
             return;
           }
+        } catch {
+          // A cache error falls through to the request error.
         }
-      } catch {
-        // Ignore parse failure
       }
       setPageError(err instanceof Error ? err.message : '加载对话空间失败');
     } finally {
-      setLoading(false);
+      if (loadRevision.current === revision) setLoading(false);
     }
   };
 
   useEffect(() => {
+    const onOnline = () => void loadData();
+    const onOffline = () => setIsOffline(true);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
     stopDollVoice();
     setSpeakingId(null);
     void loadData();
     return () => {
+      loadRevision.current++;
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
       abortRef.current?.abort();
       stopDollVoice();
     };
@@ -252,6 +252,15 @@ export function DollChatPage() {
     const controller = new AbortController();
     abortRef.current = controller;
     let streamedText = '';
+    const markInterrupted = (err: { code: string; message: string }) => {
+      setMessages(prev => prev.map(message => message.id === tempAssistantId ? {
+        ...message, status: message.content ? 'incomplete' : 'failed', errorCode: err.code,
+      } : message));
+      setStreamError({
+        code: err.code, message: err.message, retryClientMessageId: clientMessageId,
+        retryText: text, retryRememberText: explicitRemember,
+      });
+    };
 
     try {
       await streamDollChat(
@@ -302,38 +311,12 @@ export function DollChatPage() {
               playDollVoice(finalId, streamedText, doll.persona.mbti);
             }
           },
-          onError: (err) => {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === tempAssistantId
-                  ? {
-                      ...m,
-                      status: m.content ? 'incomplete' : 'failed',
-                      errorCode: err.code,
-                    }
-                  : m
-              )
-            );
-            setStreamError({
-              code: err.code,
-              message: err.message,
-              retryClientMessageId: clientMessageId,
-              retryText: text,
-            });
-          },
+          onError: markInterrupted,
         },
         controller.signal
       );
-    } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
-        const msg = err instanceof Error ? err.message : '网络连接中断';
-        setStreamError({
-          code: 'PROVIDER_ERROR',
-          message: msg,
-          retryClientMessageId: clientMessageId,
-          retryText: text,
-        });
-      }
+    } catch {
+      if (!controller.signal.aborted) markInterrupted({ code: 'CHAT_INTERRUPTED', message: '回复连接已中断，可以重试这条消息' });
     } finally {
       setSending(false);
       abortRef.current = null;
@@ -354,7 +337,8 @@ export function DollChatPage() {
   };
 
   const handleRetryFailed = async (clientMessageId: string, originalText: string) => {
-    await sendMessageInternal(originalText, clientMessageId, undefined, true);
+    const pendingMemory = streamError?.retryClientMessageId === clientMessageId ? streamError.retryRememberText : undefined;
+    await sendMessageInternal(originalText, clientMessageId, pendingMemory, true);
   };
 
   const handleAddMemory = async (e: React.FormEvent) => {

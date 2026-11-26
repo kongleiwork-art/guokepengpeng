@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { config } from '../config.ts';
 import { db } from '../db.ts';
+import { isVisitorKey } from '../../src/lib/visitorKey.ts';
 
 export interface SessionRecord {
   id: string;
@@ -74,9 +75,7 @@ function verifySignedSessionCookie(raw: string | undefined): string | null {
 
 export function extractVisitorKey(req: Request): string | null {
   const raw = (req.get('x-visitor-key') || '').trim();
-  if (!raw || raw.length < 12 || raw.length > 80) return null;
-  if (!/^[a-zA-Z0-9_-]+$/.test(raw)) return null;
-  return raw;
+  return isVisitorKey(raw) ? raw : null;
 }
 
 function isRequestHttps(req: Request): boolean {
@@ -145,11 +144,22 @@ export async function loadSessionById(sessionId: string): Promise<SessionRecord 
   return mapSessionRow(row);
 }
 
-/**
- * Dual-track session resolution for reliable NFC re-taps across Safari / Chrome / WeChat:
- * 1) Signed HttpOnly cookie (primary)
- * 2) Persistent X-Visitor-Key header fallback when mobile browsers isolate cookies between NFC taps
- */
+async function loadSessionByVisitorKey(visitorKey: string): Promise<SessionRecord | null> {
+  const row = await db.prepare(`
+    SELECT s.id, s.is_demo, s.invalidated, s.visitor_key, s.created_at, s.expires_at
+    FROM session_browser_keys b JOIN sessions s ON s.id = b.session_id
+    WHERE b.visitor_key = ?
+  `).get(visitorKey) as Parameters<typeof mapSessionRow>[0];
+  return mapSessionRow(row);
+}
+
+export async function bindVisitorKey(visitorKey: string, sessionId: string, replace = false): Promise<void> {
+  await db.prepare(`
+    INSERT INTO session_browser_keys (visitor_key, session_id) VALUES (?, ?)
+    ON CONFLICT (visitor_key) ${replace ? 'DO UPDATE SET session_id = excluded.session_id' : 'DO NOTHING'}
+  `).run(visitorKey, sessionId);
+}
+
 export async function loadExistingSession(req: Request): Promise<SessionRecord | null> {
   const raw = req.cookies?.[config.sessionCookieName];
   const sid = verifySignedSessionCookie(raw);
@@ -157,41 +167,9 @@ export async function loadExistingSession(req: Request): Promise<SessionRecord |
 
   if (sid) {
     const cookieSess = await loadSessionById(sid);
-    if (cookieSess) {
-      if (visitorKey && !cookieSess.visitorKey) {
-        await db.prepare(`UPDATE sessions SET visitor_key = ? WHERE id = ?`).run(visitorKey, cookieSess.id);
-        cookieSess.visitorKey = visitorKey;
-      }
-      return cookieSess;
-    }
+    if (cookieSess) return cookieSess;
   }
-
-  if (visitorKey) {
-    const row = await db
-      .prepare(
-        `SELECT id, is_demo, invalidated, visitor_key, created_at, expires_at
-         FROM sessions
-         WHERE visitor_key = ? AND invalidated = 0
-         ORDER BY created_at DESC
-         LIMIT 1`
-      )
-      .get(visitorKey) as
-      | {
-          id: string;
-          is_demo: number;
-          invalidated: number;
-          visitor_key: string | null;
-          created_at: string;
-          expires_at: string;
-        }
-      | undefined;
-    const restored = mapSessionRow(row);
-    if (restored) {
-      return restored;
-    }
-  }
-
-  return null;
+  return visitorKey ? loadSessionByVisitorKey(visitorKey) : null;
 }
 
 export async function createNewSession(visitorKey?: string | null): Promise<SessionRecord> {
@@ -208,18 +186,14 @@ export async function createNewSession(visitorKey?: string | null): Promise<Sess
 
   const create = db.transaction(async () => {
     if (visitorKey) {
-      const existing = await db.prepare(
-        `SELECT id, is_demo, invalidated, visitor_key, created_at, expires_at
-         FROM sessions WHERE visitor_key = ? AND invalidated = 0 AND expires_at > ?
-         ORDER BY created_at DESC LIMIT 1`
-      ).get(visitorKey, record.createdAt) as Parameters<typeof mapSessionRow>[0];
-      const restored = mapSessionRow(existing);
+      const restored = await loadSessionByVisitorKey(visitorKey);
       if (restored) return restored;
     }
     await db.prepare(
       `INSERT INTO sessions (id, is_demo, invalidated, visitor_key, created_at, expires_at)
        VALUES (?, 1, 0, ?, ?, ?)`
     ).run(record.id, record.visitorKey, record.createdAt, record.expiresAt);
+    if (visitorKey) await bindVisitorKey(visitorKey, record.id, true);
     return record;
   });
 
@@ -228,12 +202,8 @@ export async function createNewSession(visitorKey?: string | null): Promise<Sess
 
 export async function ensureSession(req: Request, res: Response, next: NextFunction): Promise<void> {
   const visitorKey = extractVisitorKey(req);
-  let session = await loadExistingSession(req);
-  if (!session) {
-    session = await createNewSession(visitorKey);
-    setSessionCookie(req, res, session);
-  } else if (!req.cookies?.[config.sessionCookieName]) {
-    // Re-hydrate HttpOnly cookie if restored via visitor key
+  const session = await loadExistingSession(req) ?? await createNewSession(visitorKey);
+  if (verifySignedSessionCookie(req.cookies?.[config.sessionCookieName]) !== session.id) {
     setSessionCookie(req, res, session);
   }
   req.session = session;

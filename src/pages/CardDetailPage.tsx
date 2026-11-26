@@ -13,6 +13,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { api, ApiError, generateIdempotencyKey } from '../lib/api';
+import { startTaskPolling } from '../lib/taskPolling';
 import type { CardDetail, FallbackTemplate, OutputJob } from '../lib/types';
 import { SafeImage } from '../components/SafeImage';
 import { MaterialPlanList } from '../components/MaterialPlanList';
@@ -49,11 +50,12 @@ export function CardDetailPage() {
   const [jobs, setJobs] = useState<OutputJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pollNotice, setPollNotice] = useState<string | null>(null);
 
   const [selectedVersionId, setSelectedVersionId] = useState<string>('');
   const [dollName, setDollName] = useState('');
   const [actionBusy, setActionBusy] = useState<string | null>(null);
-  const [actionMsg, setActionMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const [actionMsg, setActionMsg] = useState<{ kind: 'ok' | 'err'; text: string; selectMaterials?: boolean } | null>(null);
 
   const [showFallbackPicker, setShowFallbackPicker] = useState(false);
 
@@ -61,8 +63,9 @@ export function CardDetailPage() {
   const [copiedDollUrl, setCopiedDollUrl] = useState(false);
   const [mobileCardTab, setMobileCardTab] = useState<'versions' | 'actions'>('versions');
 
-  const refreshCardAndJobs = async () => {
-    const [detail, jobList] = await Promise.all([api.getCard(cardId), api.listPlotJobs(cardId)]);
+  const refreshCardAndJobs = async (signal?: AbortSignal) => {
+    const [detail, jobList] = await Promise.all([api.getCard(cardId, signal), api.listPlotJobs(cardId, signal)]);
+    if (signal?.aborted) return { detail, jobList };
     setCard(detail);
     setJobs(jobList);
 
@@ -73,43 +76,49 @@ export function CardDetailPage() {
       return latestSucceeded?.id || detail.activeVersionId || detail.versions[0]?.id || '';
     });
 
-    if (!dollName && !detail.boundDoll) {
+    if (!detail.boundDoll) {
       const sug = detail.versions.find((v) => v.suggestedName)?.suggestedName;
-      if (sug) setDollName(sug);
+      if (sug) setDollName(current => current || sug);
     }
     return { detail, jobList };
   };
 
   useEffect(() => {
-    let active = true;
     setLoading(true);
-    (async () => {
-      try {
-        await api.initSession();
-        const [tpls] = await Promise.all([api.listTemplates(), refreshCardAndJobs()]);
-        if (active) setTemplates(tpls);
-      } catch (err) {
-        if (active) setError(err instanceof Error ? err.message : '加载作品详情失败');
-      } finally {
-        if (active) setLoading(false);
+    setError(null);
+    setPollNotice(null);
+    return startTaskPolling(async (signal) => {
+      await api.initSession(signal);
+      const [tpls] = await Promise.all([api.listTemplates(signal), refreshCardAndJobs(signal)]);
+      if (!signal.aborted) {
+        setTemplates(tpls);
+        setPollNotice(null);
+        setLoading(false);
       }
-    })();
-    return () => {
-      active = false;
-    };
+      return false;
+    }, (err, retrying) => {
+      if (retrying) setPollNotice('连接暂时中断，正在重新加载这件作品。');
+      else {
+        setError(err instanceof Error ? err.message : '加载作品详情失败');
+        setLoading(false);
+      }
+    });
   }, [cardId]);
 
+  const hasPendingTask = !loading && card?.id === cardId && (
+    card.versions.some(v => v.status === 'queued' || v.status === 'running') ||
+    jobs.some(j => j.status === 'queued' || j.status === 'running')
+  );
   useEffect(() => {
-    if (!card) return;
-    const hasActiveVer = card.versions.some((v) => v.status === 'queued' || v.status === 'running');
-    const hasActiveJob = jobs.some((j) => j.status === 'queued' || j.status === 'running');
-    if (!hasActiveVer && !hasActiveJob) return;
-
-    const timer = setTimeout(() => {
-      void refreshCardAndJobs().catch(() => {});
+    if (!hasPendingTask) return;
+    return startTaskPolling(async (signal) => {
+      await refreshCardAndJobs(signal);
+      if (!signal.aborted) setPollNotice(null);
+      return true;
+    }, (err, retrying) => {
+      setPollNotice(retrying ? '连接暂时中断，正在重新查询原任务。' : err instanceof Error ? err.message : '查询任务失败');
     }, 1000);
-    return () => clearTimeout(timer);
-  }, [card, jobs]);
+  }, [cardId, hasPendingTask]);
 
   const handleRedraw = async (simulateFail = false) => {
     if (!card || actionBusy) return;
@@ -129,7 +138,7 @@ export function CardDetailPage() {
       });
     } catch (err) {
       const text = err instanceof ApiError ? `[${err.code}] ${err.message}` : '重生成请求失败';
-      setActionMsg({ kind: 'err', text });
+      setActionMsg({ kind: 'err', text, selectMaterials: err instanceof ApiError && err.code === 'MATERIAL_SELECTION_REQUIRED' });
       if (err instanceof ApiError && err.code === 'QUEUE_UNAVAILABLE') {
         await refreshCardAndJobs().catch(() => {});
       }
@@ -242,7 +251,10 @@ export function CardDetailPage() {
   };
 
   if (loading) {
-    return <WatercolorCardDetailSkeleton />;
+    return <>
+      {pollNotice && <p role="status" className="px-4 py-3 text-center text-xs text-[#875220]">{pollNotice}</p>}
+      <WatercolorCardDetailSkeleton />
+    </>;
   }
 
   if (error || !card) {
@@ -349,6 +361,7 @@ export function CardDetailPage() {
         })}
       </div>
 
+      {pollNotice && <p role="status" className="text-xs text-[#875220]">{pollNotice}</p>}
       <AnimatePresence>
         {actionMsg && (
           <motion.div
@@ -362,6 +375,7 @@ export function CardDetailPage() {
             }`}
           >
             {actionMsg.text}
+            {actionMsg.selectMaterials && <Link to="/create" className="ml-2 font-medium underline">重新定制选材</Link>}
           </motion.div>
         )}
       </AnimatePresence>

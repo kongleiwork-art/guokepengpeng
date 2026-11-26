@@ -12,6 +12,7 @@ import {
   type MaterialCategory,
 } from './data/seed.ts';
 import { MATERIAL_PACK, MATERIAL_PACK_BY_ID } from './data/materialPack.ts';
+import { LEGACY_SHARED_VISITOR_KEY } from '../src/lib/visitorKey.ts';
 
 import { db } from './databaseClient.ts';
 export { db };
@@ -47,6 +48,7 @@ async function ensureColumnExists(table: string, column: string, definition: str
 }
 
 let initialization: ReturnType<typeof initialize> | undefined;
+const SCHEMA_VERSION = 3;
 
 export function initDatabase() {
   initialization ??= initialize().catch((error) => {
@@ -70,17 +72,18 @@ async function initialize(): Promise<{ recoveredRunningVersions: number; recover
   };
   const migrate = db.transaction(async () => {
     const version = await schemaVersion();
-    if (version >= 2) return;
+    if (version >= SCHEMA_VERSION) return;
     if (version < 1) {
       const legacy = await db.prepare('PRAGMA user_version').get() as { user_version: number };
       if (legacy.user_version < 1) await migrateAndSeed();
     }
-    await installMaterialPack();
+    if (version < 2) await installMaterialPack();
+    if (version < 3) await migrateSessionAndUsage();
     await db.prepare(
-      "INSERT INTO app_settings (key, value) VALUES ('schema_version', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    ).run();
+      "INSERT INTO app_settings (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    ).run(String(SCHEMA_VERSION));
   });
-  if (await schemaVersion() < 2) await migrate();
+  if (await schemaVersion() < SCHEMA_VERSION) await migrate();
   if (config.isVercel) return { recoveredRunningVersions: 0, recoveredRunningJobs: 0 };
 
   const now = new Date().toISOString();
@@ -89,6 +92,35 @@ async function initialize(): Promise<{ recoveredRunningVersions: number; recover
     config.sessionSecret = row?.value || '';
   }
   return recoverInterruptedLocalJobs(now);
+}
+
+async function migrateSessionAndUsage() {
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS session_browser_keys (
+      visitor_key TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_browser_keys_session ON session_browser_keys(session_id);
+
+    CREATE TABLE IF NOT EXISTS request_budgets (
+      scope TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      window_end INTEGER NOT NULL,
+      used INTEGER NOT NULL,
+      PRIMARY KEY (scope, subject, window_end)
+    );
+    CREATE INDEX IF NOT EXISTS idx_request_budgets_expiry ON request_budgets(window_end);
+    CREATE INDEX IF NOT EXISTS idx_card_versions_active ON card_versions(provider, status)
+      WHERE status IN ('queued', 'running');
+  `);
+  await db.prepare('UPDATE sessions SET invalidated = 1 WHERE visitor_key = ?').run(LEGACY_SHARED_VISITOR_KEY);
+  await db.prepare(`
+    INSERT OR IGNORE INTO session_browser_keys (visitor_key, session_id)
+    SELECT visitor_key, id FROM sessions
+    WHERE visitor_key IS NOT NULL AND invalidated = 0 AND expires_at > ?
+    ORDER BY created_at DESC, id DESC
+  `).run(new Date().toISOString());
+  await db.prepare('DELETE FROM session_claim_codes').run();
 }
 
 async function migrateAndSeed(): Promise<void> {
@@ -502,6 +534,15 @@ export async function listMaterials(onlyInStock = false): Promise<MaterialRecord
 export async function listCreationMaterials(strict: boolean): Promise<MaterialRecord[]> {
   const materials = await listMaterials(true);
   return strict ? materials.filter(material => material.referenceImageUrl) : materials;
+}
+
+export function selectMaterialPlan(ids: string[], materials: MaterialRecord[]): MaterialRecord[] | null {
+  if (ids.length === 0 || ids.length > 6 || new Set(ids).size !== ids.length) return null;
+  const byId = new Map(materials.map(material => [material.id, material]));
+  const plan = ids.map(id => byId.get(id));
+  return plan.every((material): material is MaterialRecord => Boolean(
+    material?.referenceImageUrl && MATERIAL_PACK_BY_ID.get(material.id)?.referenceImageUrl === material.referenceImageUrl,
+  )) ? plan : null;
 }
 
 export async function getMaterialsByIds(ids: string[]): Promise<MaterialRecord[]> {

@@ -29,6 +29,11 @@ function resolveProviderMode(explicit: string | undefined, configured: boolean):
   return configured ? 'cloud' : 'mock';
 }
 
+function positiveInteger(value: string | undefined, fallback: number): number {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : fallback;
+}
+
 const imageProvider = resolveProviderMode(
   process.env.IMAGE_PROVIDER,
   isVercel || Boolean(imageVendor === 'openai' ? openaiImageKey : geminiApiKey),
@@ -82,6 +87,10 @@ export const config = {
   openaiApiBase: (process.env.OPENAI_IMAGE_API_BASE || 'https://api.openai.com/v1').replace(/\/+$/, ''),
   imageTimeoutMs: Math.max(5000, Math.min(115000, Number(process.env.IMAGE_TIMEOUT_MS || 90000))),
   maxRegenerations: Math.max(0, Number(process.env.MAX_REGENERATIONS || 2)),
+  imageDailyLimit: positiveInteger(process.env.IMAGE_DAILY_LIMIT, 60),
+  imageVisitorDailyLimit: positiveInteger(process.env.IMAGE_VISITOR_DAILY_LIMIT, 10),
+  imageIpTenMinuteLimit: positiveInteger(process.env.IMAGE_IP_TEN_MINUTE_LIMIT, 20),
+  imageQueueLimit: positiveInteger(process.env.IMAGE_QUEUE_LIMIT, 5),
   outputProvider: 'mock' as const,
   demoAdminToken: process.env.DEMO_ADMIN_TOKEN?.trim() || '',
   photoTtlHours: 24,

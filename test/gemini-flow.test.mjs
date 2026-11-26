@@ -239,6 +239,7 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
 test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { timeout: 30000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'nutshell-providers-'));
   const calls = { chat: [], image: [], review: [] };
+  let portraitAttempts = 0;
   const fixture = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -256,6 +257,10 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
         return;
       }
       calls.chat.push(payload);
+      if (Array.isArray(payload.messages.at(-1).content) && ++portraitAttempts === 1) {
+        res.writeHead(503).end();
+        return;
+      }
       if (payload.messages.at(-1).content === '试试额度错误') {
         res.writeHead(402, { 'Content-Type': 'application/json' }).end('{}');
         return;
@@ -338,6 +343,7 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   portrait.set('photo', new Blob([photo], { type: 'image/jpeg' }), 'reference.jpg');
   const brief = await json(await owner('/api/mbti/recommend', { method: 'POST', body: portrait }));
   assert.equal(brief.source, 'cloud_vision');
+  assert.equal(portraitAttempts, 2);
   assert.deepEqual(brief.suggestedMaterialIds, ['kit_capped_acorn', 'kit_cloud_cotton']);
   assert.equal(calls.image.length, 0);
 
@@ -416,4 +422,114 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.equal(calls.image.length, 3);
   assert.ok(calls.image[1].body.includes(brief.dollDesign));
   assert.ok(calls.image[1].body.includes(acornArtwork));
+});
+
+test('续聊口令只用一次，原浏览器和新浏览器都保留会话', { timeout: 10000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'nutshell-claim-'));
+  const { base } = await startApp(t, dir, { IMAGE_PROVIDER: 'mock' });
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const original = 'vk_claim_original_browser';
+  const receiving = 'vk_claim_receiving_browser';
+  const post = (visitor, pathname, data = {}) => fetch(base + pathname, {
+    method: 'POST', headers: { 'X-Visitor-Key': visitor, 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+  });
+  const first = await json(await post(original, '/api/session'));
+  const beforeClaim = await json(await post(receiving, '/api/session'));
+  assert.notEqual(first.sessionId, beforeClaim.sessionId);
+
+  const previous = await json(await post(original, '/api/session/claim-code'));
+  const claim = await json(await post(original, '/api/session/claim-code'));
+  assert.ok(Date.parse(claim.expiresAt) - Date.now() <= 600_000);
+  await json(await post(receiving, '/api/session/claim', { code: previous.code }), 404);
+  assert.equal((await json(await post(receiving, '/api/session/claim', { code: claim.code }))).sessionId, first.sessionId);
+  await json(await post(receiving, '/api/session/claim', { code: claim.code }), 404);
+
+  assert.equal((await json(await post(original, '/api/session'))).sessionId, first.sessionId);
+  assert.equal((await json(await post(receiving, '/api/session'))).sessionId, first.sessionId);
+  const legacy = 'vk_ephemeral_fallback_0001';
+  assert.notEqual((await json(await post(legacy, '/api/session'))).sessionId,
+    (await json(await post(legacy, '/api/session'))).sessionId);
+});
+
+test('旧卡重生成受严格材料核对和并发、日额度限制', { timeout: 15000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'nutshell-admission-'));
+  const imageBodies = [];
+  let reviews = 0;
+  let releaseFirstImage;
+  const firstImageCanFinish = new Promise(resolve => { releaseFirstImage = resolve; });
+  const provider = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/v1/images/edits') {
+      imageBodies.push(Buffer.concat(chunks));
+      if (imageBodies.length === 1) await firstImageCanFinish;
+      res.end(JSON.stringify({ data: [{ b64_json: output.toString('base64') }] }));
+    } else {
+      reviews++;
+      res.end(JSON.stringify({ choices: [{ message: { content: '{"matches":true,"unmatchedParts":[]}' } }] }));
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  t.after(() => new Promise(done => provider.close(done)));
+  const endpoint = 'http://127.0.0.1:' + provider.address().port + '/v1';
+  const { base } = await startApp(t, dir, {
+    IMAGE_PROVIDER: 'cloud', IMAGE_VENDOR: 'openai', OPENAI_API_KEY: 'fixture', OPENAI_IMAGE_API_BASE: endpoint,
+    STEPFUN_API_KEY: 'fixture', STEPFUN_VISION_MODEL: 'step-5-preview', STEPFUN_API_BASE: endpoint,
+    IMAGE_DAILY_LIMIT: '2', IMAGE_QUEUE_LIMIT: '1', DEMO_ADMIN_TOKEN: 'fixture-admin',
+  });
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const visitor = 'vk_old_card_creation_owner';
+  const owner = (pathname, init = {}, whom = visitor) => fetch(base + pathname, {
+    ...init, headers: { 'X-Visitor-Key': whom, ...init.headers },
+  });
+  const setStrict = async (value) => json(await owner('/api/demo/settings', {
+    method: 'PATCH', headers: { Authorization: 'Bearer fixture-admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ strictMaterialConstraint: value }),
+  }));
+  const create = (whom, key) => {
+    const form = new FormData();
+    form.set('photo', new Blob([photo], { type: 'image/jpeg' }), 'sample.jpg');
+    form.set('userNickname', '工坊测试');
+    form.set('personaId', 'persona_enfp');
+    form.set('accessoryIds', JSON.stringify(['kit_capped_acorn', 'kit_cloud_cotton']));
+    return owner('/api/cards', { method: 'POST', headers: { 'Idempotency-Key': key }, body: form }, whom);
+  };
+  const finish = async (versionId) => {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const version = await json(await owner('/api/card-versions/' + versionId));
+      if (!['queued', 'running'].includes(version.status)) {
+        assert.equal(version.status, 'succeeded', version.errorMessage);
+        return;
+      }
+      await delay(80);
+    }
+    throw new Error('生成任务没有完成');
+  };
+
+  await setStrict(false);
+  const first = await json(await create(visitor, 'old-card'), 202);
+  try {
+    const concurrent = await create('vk_other_queue_visitor', 'other-card');
+    assert.equal(concurrent.status, 429);
+    assert.equal((await concurrent.json()).error.code, 'IMAGE_QUEUE_FULL');
+  } finally {
+    releaseFirstImage();
+  }
+  await finish(first.versionId);
+  assert.ok(imageBodies[0].includes(photo));
+  await setStrict(true);
+  const redraw = () => owner('/api/cards/' + first.cardId + '/redraw', {
+    method: 'POST', headers: { 'Idempotency-Key': 'strict-redraw' },
+  });
+  const regenerated = await json(await redraw(), 202);
+  await finish(regenerated.versionId);
+  assert.ok(!imageBodies[1].includes(photo));
+  assert.equal(reviews, 1);
+  assert.equal((await json(await redraw(), 202)).versionId, regenerated.versionId);
+  const overBudget = await create('vk_other_queue_visitor', 'new-card');
+  assert.equal(overBudget.status, 429);
+  assert.equal((await overBudget.json()).error.code, 'IMAGE_RATE_LIMIT');
+  assert.equal(imageBodies.length, 2);
 });

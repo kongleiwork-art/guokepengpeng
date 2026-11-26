@@ -50,6 +50,8 @@
 
 - `GET /api/health` (`none`) → `200 { data: { status: "ok", timestamp } }`
 - `POST /api/session` (`none`) → `200` 建立或恢复 HttpOnly Cookie，返回 `{ sessionId, isDemo, expiresAt }`
+- `POST /api/session/claim-code` (`session`) → 生成最长 10 分钟有效的一次性续聊口令，替换本会话已有的未用口令。
+- `POST /api/session/claim` Body `{ code }` → 接入该口令对应的会话，并将当前浏览器加入会话。口令使用或过期后返回 `404 CLAIM_CODE_EXPIRED`。
 
 ### 2. 人格、配饰与模板配置
 
@@ -101,6 +103,7 @@ data: {"code":"CHAT_TIMEOUT","message":"对话首字响应超过 10000ms 超时�
   - 字段：`photo`（JPEG/PNG/WebP，二进制头校验且 ≤ 2 MB）、`userNickname`、`personaId`、可选 `accessoryIds`。
   - 可选 `photoStyle` 和 `dollDesign`，最多 120 和 180 个字符。文本随任务快照保存，重生成时沿用原方案。
   - 严格实材模式要求选择 1 到 6 种有参考图的可用材料。选材和图片引用随任务保存，缺图时返回 `MATERIAL_REFERENCES_REQUIRED`。
+  - 云端任务达到并发或额度上限时返回 `429`，同一幂等请求可以继续查询原任务。旧卡重生成会校验原选材，缺少可用材料图时返回 `409 MATERIAL_SELECTION_REQUIRED`。
   - 返回 `202 { cardId, versionId, status: "queued", provider, cardUrl, processingUrl }`。
 - `GET /api/cards/:id` (`owner`) → `200` 返回卡片详情、全部 `versions`、`activeVersionId`、`remainingAttempts`、`boundDollId`、`boundDoll`、`photoAvailable`。
 - `GET /api/cards/:id/photo` (`owner`) → 返回原始上传照片流；已过期返回 `410 PHOTO_EXPIRED`；非拥有者返回 `404`。

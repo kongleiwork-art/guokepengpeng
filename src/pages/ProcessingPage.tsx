@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { ArrowRight, PenTool, XCircle } from 'lucide-react';
 import { api, ApiError, generateIdempotencyKey } from '../lib/api';
+import { startTaskPolling } from '../lib/taskPolling';
 import type { CardDetail } from '../lib/types';
 
 const STATUS_LABELS: Record<string, string> = {
@@ -20,6 +21,7 @@ export function ProcessingPage() {
 
   const [card, setCard] = useState<CardDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
   const [cancelNotice, setCancelNotice] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -30,47 +32,31 @@ export function ProcessingPage() {
       return;
     }
 
-    let stopped = false;
-    let pollTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const poll = async () => {
-      try {
-        const detail = await api.getCard(cardId);
-        if (stopped) return;
-        setCard(detail);
-        setError(null);
-
-        const activeVer =
-          detail.versions.find((v) => v.id === detail.activeVersionId) ||
-          detail.versions[detail.versions.length - 1];
-
-        if (!activeVer) return;
-
-        if (activeVer.status === 'succeeded') {
-          setTimeout(() => {
-            if (!stopped) navigate(`/card/${cardId}`, { replace: true });
-          }, 500);
-          return;
-        }
-
-        if (activeVer.status === 'queued' || activeVer.status === 'running') {
-          pollTimer = setTimeout(poll, 1000);
-        }
-      } catch (err) {
-        if (stopped) return;
-        setError(err instanceof Error ? err.message : '查询生成状态失败');
+    setError(null);
+    setReconnecting(false);
+    let redirectTimer: ReturnType<typeof setTimeout> | undefined;
+    const stopPolling = startTaskPolling(async (signal) => {
+      const detail = await api.getCard(cardId, signal);
+      if (signal.aborted) return false;
+      setCard(detail);
+      setReconnecting(false);
+      const activeVer = detail.versions.find(v => v.id === detail.activeVersionId) ?? detail.versions.at(-1);
+      if (activeVer?.status === 'succeeded') {
+        redirectTimer = setTimeout(() => navigate(`/card/${cardId}`, { replace: true }), 500);
       }
-    };
-
-    void poll();
+      return activeVer?.status === 'queued' || activeVer?.status === 'running';
+    }, (err, retrying) => {
+      setReconnecting(retrying);
+      if (!retrying) setError(err instanceof Error ? err.message : '查询生成状态失败');
+    });
 
     const clock = setInterval(() => {
       setElapsedSec((s) => s + 1);
     }, 1000);
 
     return () => {
-      stopped = true;
-      if (pollTimer) clearTimeout(pollTimer);
+      stopPolling();
+      clearTimeout(redirectTimer);
       clearInterval(clock);
     };
   }, [cardId, navigate]);
@@ -143,6 +129,7 @@ export function ProcessingPage() {
           <p className="text-xs sm:text-sm text-[#6E5C50]">
             支持刷新页面自动恢复当前进度，不会重复提交或扣减生成次数。
           </p>
+          {reconnecting && <p role="status" className="text-xs text-[#875220]">连接暂时中断，正在重新查询原任务。</p>}
         </div>
 
         <div className="p-5 rounded-xl studio-inset space-y-4">

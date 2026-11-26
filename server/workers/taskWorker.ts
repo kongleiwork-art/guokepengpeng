@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
 import { config, isPhotoMbtiEnabled } from '../config.ts';
-import { db, getMaterialsByIds, getRuntimeSettings, recordRunLog, type MaterialRecord, type RuntimeSettings } from '../db.ts';
+import {
+  db, getMaterialsByIds, getRuntimeSettings, listCreationMaterials, recordRunLog, selectMaterialPlan,
+  type MaterialRecord, type RuntimeSettings,
+} from '../db.ts';
 import { getImageProvider, saveGeneratedAsset, type DollBrief } from '../providers/imageProvider.ts';
 import { materialReviewUnavailable, verifyGeneratedMaterials } from '../providers/materialReview.ts';
 import { getOutputProvider } from '../providers/outputProvider.ts';
@@ -156,8 +159,14 @@ async function processImageVersion(versionId: string): Promise<void> {
     const runtimeSettings: ImageSettings = row.image_settings
       ? JSON.parse(row.image_settings)
       : await getRuntimeSettings();
-    const selectedMaterials = runtimeSettings.materialPlan ?? await getMaterialsByIds(accessoryIds);
-    const useExactMaterialReferences = Boolean(runtimeSettings.materialPlan);
+    const useExactMaterialReferences = runtimeSettings.strictMaterialConstraint || Boolean(runtimeSettings.materialPlan);
+    const selectedMaterials = useExactMaterialReferences
+      ? selectMaterialPlan(accessoryIds, runtimeSettings.materialPlan ?? await listCreationMaterials(true))
+      : await getMaterialsByIds(accessoryIds);
+    if (!selectedMaterials) {
+      await finalizeVersionFailure(versionId, row.provider, 'MATERIAL_SELECTION_REQUIRED', '请重新定制并选择有参考图的材料');
+      return;
+    }
     const canReviewMaterials = isPhotoMbtiEnabled();
     const shouldReviewMaterials = useExactMaterialReferences && row.provider === 'cloud' && (config.isVercel || canReviewMaterials);
     if (shouldReviewMaterials && !canReviewMaterials) throw materialReviewUnavailable();

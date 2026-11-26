@@ -28,11 +28,12 @@ import {
   listCreationMaterials,
   listMaterials,
   recordRunLog,
+  selectMaterialPlan,
   setRuntimeSetting,
 } from '../db.ts';
 import {
+  bindVisitorKey,
   clearSessionCookie,
-  createNewSession,
   ensureSession,
   extractVisitorKey,
   loadExistingSession,
@@ -52,6 +53,7 @@ import {
 import { validateImageBuffer } from '../utils/imageValidation.ts';
 import { deleteMedia, mediaExists, openMedia, writeMedia, type MediaKey } from '../mediaStore.ts';
 import { findNfcTarget } from '../nfc.ts';
+import { checkClaimAttempt, checkImageAdmission } from '../usageLimits.ts';
 import {
   enqueueImageVersion,
   enqueueOutputJob,
@@ -233,13 +235,10 @@ router.get('/health', (_req, res) => {
   });
 });
 
-router.post('/session', async (req, res) => {
+router.post('/session', ensureSession, async (req, res) => {
+  const session = req.session!;
   const visitorKey = extractVisitorKey(req);
-  let session = await loadExistingSession(req);
-  if (!session) {
-    session = await createNewSession(visitorKey);
-  }
-  setSessionCookie(req, res, session);
+  if (visitorKey && visitorKey !== session.visitorKey) await bindVisitorKey(visitorKey, session.id);
   sendSuccess(res, {
     sessionId: session.id,
     isDemo: session.isDemo,
@@ -258,24 +257,20 @@ function generateClaimCode(): string {
 }
 
 router.post('/session/claim-code', ensureSession, async (req, res) => {
-  const sessionId = req.session!.id;
+  const { id: sessionId, expiresAt: sessionExpiry } = req.session!;
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + 24 * 3600 * 1000).toISOString();
-
-  // Clean up expired codes opportunistically
-  await db.prepare(`DELETE FROM session_claim_codes WHERE expires_at < ?`).run(now.toISOString());
-
-  let code = generateClaimCode();
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const exists = await db.prepare(`SELECT code FROM session_claim_codes WHERE code = ?`).get(code);
-    if (!exists) break;
-    code = generateClaimCode();
-  }
-
-  await db.prepare(
-    `INSERT INTO session_claim_codes (code, session_id, expires_at, created_at)
-     VALUES (?, ?, ?, ?)`
-  ).run(code, sessionId, expiresAt, now.toISOString());
+  const expiresAt = new Date(Math.min(now.getTime() + 10 * 60_000, Date.parse(sessionExpiry))).toISOString();
+  const code = await db.transaction(async () => {
+    await db.prepare('DELETE FROM session_claim_codes WHERE expires_at <= ? OR session_id = ?').run(now.toISOString(), sessionId);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const candidate = generateClaimCode();
+      const inserted = await db.prepare(`
+        INSERT OR IGNORE INTO session_claim_codes (code, session_id, expires_at, created_at) VALUES (?, ?, ?, ?)
+      `).run(candidate, sessionId, expiresAt, now.toISOString());
+      if (inserted.changes === 1) return candidate;
+    }
+    throw Object.assign(new Error('暂时无法生成续聊口令，请稍后再试'), { status: 503, code: 'CLAIM_CODE_UNAVAILABLE' });
+  })();
 
   sendSuccess(res, {
     code,
@@ -291,25 +286,21 @@ router.post('/session/claim', async (req, res) => {
     return;
   }
 
-  const row = await db
-    .prepare(`SELECT code, session_id, expires_at FROM session_claim_codes WHERE code = ?`)
-    .get(rawCode) as { code: string; session_id: string; expires_at: string } | undefined;
-
-  if (!row || new Date(row.expires_at).getTime() <= Date.now()) {
-    sendError(req, res, 404, 'CLAIM_CODE_EXPIRED', '该记忆口令不存在或已过期，请重新生成');
-    return;
-  }
-
-  const targetSession = await loadSessionById(row.session_id);
-  if (!targetSession) {
-    sendError(req, res, 404, 'NOT_FOUND', '对应记忆档案已失效');
-    return;
-  }
-
+  await checkClaimAttempt(req);
   const visitorKey = extractVisitorKey(req);
-  if (visitorKey) {
-    await db.prepare(`UPDATE sessions SET visitor_key = ? WHERE id = ?`).run(visitorKey, targetSession.id);
-    targetSession.visitorKey = visitorKey;
+  const targetSession = await db.transaction(async () => {
+    const row = await db.prepare('SELECT session_id FROM session_claim_codes WHERE code = ? AND expires_at > ?')
+      .get(rawCode, new Date().toISOString()) as { session_id: string } | undefined;
+    if (!row) return null;
+    const session = await loadSessionById(row.session_id);
+    if (!session) return null;
+    await db.prepare('DELETE FROM session_claim_codes WHERE code = ?').run(rawCode);
+    if (visitorKey) await bindVisitorKey(visitorKey, session.id, true);
+    return session;
+  })();
+  if (!targetSession) {
+    sendError(req, res, 404, 'CLAIM_CODE_EXPIRED', '续聊口令已使用、过期或不存在，请重新生成');
+    return;
   }
   setSessionCookie(req, res, targetSession);
 
@@ -1259,30 +1250,39 @@ router.post('/cards', ensureSession, uploadPhoto, async (req, res) => {
   const photoHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
   const simulateFail = req.get('x-mock-fail') === 'true';
   const requestHash = hashObject({ userNickname, personaId, accessoryIds, photoHash, simulateFail, photoStyle, dollDesign });
-  const cached = await checkIdempotency<{ data: { versionId: string } }>(
-    sessionId, 'create_card', idempotencyKey, requestHash,
-  );
-  if (cached.hit) {
+  const replayCreate = async () => {
+    const cached = await checkIdempotency<{ data: { versionId: string } }>(
+      sessionId, 'create_card', idempotencyKey, requestHash,
+    );
+    if (!cached.hit) return false;
     if (cached.conflict) {
       sendError(req, res, 409, 'IDEMPOTENCY_CONFLICT', '相同幂等键提交了不同的创作参数');
     } else {
       await enqueueImageVersion(cached.body.data.versionId);
       res.status(cached.status).json(cached.body);
     }
-    return;
-  }
+    return true;
+  };
+  if (await replayCreate()) return;
 
-  if (settings.strictMaterialConstraint && (
-    accessoryIds.length === 0 || accessoryIds.length > 6 || accessoryIds.some(id => !materialsById.has(id))
-  )) {
+  const materialPlan = settings.strictMaterialConstraint ? selectMaterialPlan(accessoryIds, inStockMaterials) : undefined;
+  if (materialPlan === null) {
     sendError(req, res, 400, 'MATERIAL_REFERENCES_REQUIRED', '请选择 1 到 6 种有参考图的可用材料');
     return;
   }
-  const materialPlan = settings.strictMaterialConstraint ? accessoryIds.map(id => materialsById.get(id)!) : undefined;
   const provider = settings.imageProviderMode;
   if (provider === 'cloud' && !isImageCloudConfigured(settings.imageVendor)) {
     sendError(req, res, 503, 'PROVIDER_NOT_CONFIGURED', '当前生图服务尚未配置密钥');
     return;
+  }
+  if (provider === 'cloud') {
+    try {
+      await checkImageAdmission(req, sessionId);
+    } catch (error) {
+      // Another copy of an idempotent request may have reserved the queue slot.
+      if (await replayCreate()) return;
+      throw error;
+    }
   }
 
   const cardId = `card_${crypto.randomBytes(8).toString('hex')}`;
@@ -1297,6 +1297,7 @@ router.post('/cards', ensureSession, uploadPhoto, async (req, res) => {
   await writeMedia(`photos/${photoFilename}`, req.file.buffer, validatedImage.mimeType);
 
   const payload = await persistTask(sessionId, 'create_card', idempotencyKey, requestHash, async () => {
+    if (provider === 'cloud') await checkImageAdmission(req, sessionId, true);
     await db.prepare(
       `INSERT INTO cards (id, owner_session_id, photo_ref, photo_mime, photo_expires_at, user_nickname, persona_id,
                          accessory_ids, active_version_id, generation_attempts, created_at)
@@ -1546,11 +1547,24 @@ router.post('/cards/:id/redraw', ensureSession, async (req, res) => {
     const initialSettings = typeof card.initial_image_settings === 'string'
       ? JSON.parse(card.initial_image_settings) as ImageSettings | null
       : null;
+    const strictMaterialConstraint = runtimeSettings.strictMaterialConstraint || Boolean(
+      initialSettings?.strictMaterialConstraint || initialSettings?.materialPlan,
+    );
+    const materialPlan = strictMaterialConstraint ? selectMaterialPlan(
+      JSON.parse(String(card.accessory_ids || '[]')) as string[],
+      initialSettings?.materialPlan ?? await listCreationMaterials(true),
+    ) : undefined;
+    if (materialPlan === null) {
+      throw Object.assign(new Error('这张旧作品缺少可用的材料图，请重新定制并选材'), {
+        status: 409, code: 'MATERIAL_SELECTION_REQUIRED',
+      });
+    }
     const imageSettings = snapshotImageSettings({
-      ...runtimeSettings, photoStyle: initialSettings?.photoStyle, dollDesign: initialSettings?.dollDesign,
-      materialPlan: initialSettings?.materialPlan,
+      ...runtimeSettings, strictMaterialConstraint, photoStyle: initialSettings?.photoStyle,
+      dollDesign: initialSettings?.dollDesign, materialPlan,
     });
 
+    if (providerMode === 'cloud') await checkImageAdmission(req, sessionId, true);
     await db.prepare(
       `INSERT INTO card_versions (id, card_id, version_number, status, provider, result_kind, created_at, image_settings, simulate_fail)
        VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)`
@@ -2644,6 +2658,7 @@ router.post('/demo/reset', requireAdmin, async (req, res) => {
     }
   }
 
+  const callerSession = await loadExistingSession(req);
   const resetTx = db.transaction(async () => {
     await db.prepare(`DELETE FROM messages WHERE session_id = ?`).run(targetSessionId);
     await db.prepare(`DELETE FROM memories WHERE session_id = ?`).run(targetSessionId);
@@ -2652,6 +2667,7 @@ router.post('/demo/reset', requireAdmin, async (req, res) => {
     await db.prepare(`DELETE FROM cards WHERE owner_session_id = ?`).run(targetSessionId);
     await db.prepare(`DELETE FROM idempotency_keys WHERE session_id = ?`).run(targetSessionId);
     await db.prepare(`DELETE FROM session_claim_codes WHERE session_id = ?`).run(targetSessionId);
+    await db.prepare(`DELETE FROM session_browser_keys WHERE session_id = ?`).run(targetSessionId);
     await db.prepare(`UPDATE sessions SET invalidated = 1 WHERE id = ?`).run(targetSessionId);
   });
   await resetTx();
@@ -2662,7 +2678,6 @@ router.post('/demo/reset', requireAdmin, async (req, res) => {
     });
   }
 
-  const callerSession = await loadExistingSession(req);
   if (callerSession?.id === targetSessionId) {
     clearSessionCookie(req, res);
   }
