@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -264,6 +265,32 @@ test('照片识别超时后换新时限重试，连续超时后结束', async (t
   await assert.rejects(analyze(), { status: 504, code: 'PROVIDER_TIMEOUT' });
   assert.equal(attempts.length, 4);
   assert.equal(attempts[2].body, attempts[3].body);
+});
+
+test('Step Plan 跨机房入口拒绝未签名、过期或被改动的请求', async (t) => {
+  const { config } = await import('../server/config.ts');
+  const { POST } = await import('../api/step-plan-relay.ts');
+  const { readRelaySignature, verifyRelaySignature } = await import('../server/providers/stepPlanTransport.ts');
+  const { isVercel, chatApiBase, chatApiKey, sessionSecret } = config;
+  t.after(() => Object.assign(config, { isVercel, chatApiBase, chatApiKey, sessionSecret }));
+  Object.assign(config, {
+    isVercel: true, chatApiBase: 'https://api.stepfun.com/step_plan/v1',
+    chatApiKey: 'fixture', sessionSecret: 'fixture-signing-secret',
+  });
+  const body = '{"model":"step-5-preview"}';
+  const sign = (timestamp) => ({
+    'x-step-plan-timestamp': timestamp,
+    'x-step-plan-signature': createHmac('sha256', config.sessionSecret)
+      .update('step-plan-relay\n' + timestamp + '\n').update(body).digest('base64url'),
+  });
+  const request = (headers, payload = body) => new Request('https://example.test/internal/step-plan', {
+    method: 'POST', headers, body: payload,
+  });
+  const valid = sign(String(Date.now()));
+  assert.ok(verifyRelaySignature(Buffer.from(body), readRelaySignature(request(valid))));
+  assert.equal((await POST(request())).status, 401);
+  assert.equal((await POST(request(sign(String(Date.now() - 61_000))))).status, 401);
+  assert.equal((await POST(request(valid, body + ' '))).status, 401);
 });
 
 test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { timeout: 30000 }, async (t) => {
