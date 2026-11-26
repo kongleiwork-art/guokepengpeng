@@ -467,9 +467,13 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.equal(calls.image[0].body.toString().match(/name="image\[\]"/g).length, brief.materialPlan.length);
   assert.equal(calls.review.length, 1);
   assert.equal(calls.review[0].model, 'step-5-preview');
+  assert.equal(calls.review[0].reasoning_effort, 'low');
+  assert.equal(calls.review[0].max_tokens, 900);
   const [checklist, candidate] = calls.review[0].messages[1].content;
   assert.match(checklist.text, /带帽橡果.*头部/);
   assert.match(checklist.text, /云朵棉面料.*围巾或衣片/);
+  assert.match(checklist.text, /眼睛2枚、鼻子1枚/);
+  assert.equal(candidate.image_url.detail, 'low');
   assert.equal(candidate.image_url.url, 'data:image/jpeg;base64,' + output.toString('base64'));
   assert.equal((await fetch(base + version.resultUrl)).status, 404);
   assert.equal((await owner(version.resultUrl)).status, 200);
@@ -487,6 +491,7 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   const rejected = await waitFor('/api/card-versions/' + mismatch.versionId);
   assert.equal(rejected.status, 'failed');
   assert.equal(rejected.errorCode, 'MATERIAL_MISMATCH');
+  assert.match(rejected.errorMessage, /木枝手脚/);
   assert.equal(rejected.resultUrl, null);
   await assert.rejects(readFile(path.join(dir, 'files', 'generated', `${mismatch.versionId}.jpg`)), { code: 'ENOENT' });
   assert.equal(calls.review.length, 2);
