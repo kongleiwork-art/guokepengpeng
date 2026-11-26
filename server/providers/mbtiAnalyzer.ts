@@ -95,7 +95,7 @@ async function recommendFromPhoto(
     ],
     config.stepfunVisionModel,
     // 两次请求和短暂退避需给 Vercel 的 60 秒 API 留出其他操作的时间。
-    { maxTokens: 640, attemptTimeoutsMs: [20_000, 28_000] },
+    { maxTokens: 1280, attemptTimeoutsMs: [20_000, 28_000] },
   );
   const photoStyle = typeof observation.photoStyle === 'string' ? observation.photoStyle.trim().slice(0, 120) : '';
   if (!photoStyle) {
