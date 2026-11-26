@@ -31,6 +31,18 @@ export interface PersonaPublic {
   featured?: boolean;
 }
 
+export type MaterialSize =
+  | { kind: 'length' | 'width' | 'height' | 'diameter'; cm: number }
+  | { kind: 'rectangle'; lengthCm: number; widthCm: number };
+
+export interface MaterialAmount {
+  quantity: number;
+  unit: string;
+  action: 'pick' | 'cut';
+  part?: string;
+  size?: MaterialSize;
+}
+
 export interface AccessoryOption {
   id: string;
   label: string;
@@ -40,6 +52,7 @@ export interface AccessoryOption {
   visualHint?: string;
   referenceImageUrl?: string;
   inStock?: boolean;
+  amounts?: MaterialAmount[];
 }
 
 export interface MaterialRecord {
@@ -49,6 +62,7 @@ export interface MaterialRecord {
   material: string;
   visualHint: string;
   referenceImageUrl?: string;
+  amounts?: MaterialAmount[];
   inStock: boolean;
   sortOrder: number;
   createdAt?: string;
@@ -69,6 +83,7 @@ export interface MbtiRecommendation {
   keywords: string[];
   reason: string;
   suggestedMaterialIds: string[];
+  materialPlan?: AccessoryOption[];
   photoStyle?: string;
   dollDesign?: string;
   source: 'cloud_vision' | 'cloud_quiz' | 'quiz_rule';

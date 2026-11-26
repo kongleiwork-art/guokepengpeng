@@ -468,10 +468,9 @@ export function CardDetailPage() {
             )}
             {selectedVersion?.status === 'succeeded' && selectedVersion.resultKind === 'generated' &&
               card.materialPlan && card.materialPlan.length > 0 && (
-                <section className="space-y-2 border-t border-[#EAE2D6] bg-[#F7F5EE] p-5">
-                  <h2 className="text-sm font-semibold text-[#382A22]">这张图的选材</h2>
+                <div className="border-t border-[#EAE2D6] bg-[#F7F5EE] p-5">
                   <MaterialPlanList materials={card.materialPlan} />
-                </section>
+                </div>
               )}
           </div>
 

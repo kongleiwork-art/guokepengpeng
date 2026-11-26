@@ -345,6 +345,18 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.equal(brief.source, 'cloud_vision');
   assert.equal(portraitAttempts, 2);
   assert.deepEqual(brief.suggestedMaterialIds, ['kit_capped_acorn', 'kit_cloud_cotton']);
+  assert.deepEqual(brief.materialPlan.map(item => item.id), brief.suggestedMaterialIds);
+  assert.deepEqual(brief.materialPlan[0].amounts, [{
+    quantity: 1, unit: '颗', action: 'pick', size: { kind: 'height', cm: 2.5 },
+  }]);
+  assert.deepEqual(brief.materialPlan[1].amounts, [{
+    quantity: 1, unit: '片', action: 'cut', size: { kind: 'rectangle', lengthCm: 12, widthCm: 3 },
+  }]);
+  const catalog = await json(await owner('/api/accessories'));
+  assert.ok(catalog.every(item => item.amounts.length > 0));
+  assert.deepEqual(catalog.find(item => item.id === 'kit_hemp_twine').amounts, [{
+    quantity: 2, unit: '段', action: 'cut', size: { kind: 'length', cm: 6 },
+  }]);
   assert.equal(calls.image.length, 0);
 
   const create = (dollDesign = brief.dollDesign) => {
@@ -374,6 +386,7 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.equal(version.status, 'succeeded', version.errorMessage);
   const detail = await json(await owner('/api/cards/' + first.cardId));
   assert.deepEqual(detail.materialPlan.map(item => item.id), brief.suggestedMaterialIds);
+  assert.deepEqual(detail.materialPlan.map(item => item.amounts), brief.materialPlan.map(item => item.amounts));
   assert.ok(detail.materialPlan.every(item => item.referenceImageUrl));
   assert.equal(calls.image.length, 1);
   assert.equal(calls.image[0].auth, 'Bearer fixture');
@@ -384,6 +397,7 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.ok(calls.image[0].body.includes('gpt-image-2.6-flare'));
   assert.ok(calls.image[0].body.includes('Input image 1: 带帽橡果'));
   assert.ok(calls.image[0].body.includes('Input image 2: 云朵棉面料'));
+  assert.ok(calls.image[0].body.includes('裁 1 片，12 × 3 cm（长 × 宽）'));
   assert.ok(calls.image[0].body.includes('The material list below is exhaustive'));
   assert.ok(calls.image[0].body.includes(acornArtwork));
   assert.ok(calls.image[0].body.includes(cottonArtwork));

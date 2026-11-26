@@ -12,7 +12,9 @@ import {
   type MaterialCategory,
 } from './data/seed.ts';
 import { MATERIAL_PACK, MATERIAL_PACK_BY_ID } from './data/materialPack.ts';
+import { getMaterialAmounts } from './data/materialAmounts.ts';
 import { LEGACY_SHARED_VISITOR_KEY } from '../src/lib/visitorKey.ts';
+import type { MaterialAmount } from '../src/lib/types.ts';
 
 import { db } from './databaseClient.ts';
 export { db };
@@ -24,6 +26,7 @@ export interface MaterialRecord {
   material: string;
   visualHint: string;
   referenceImageUrl?: string;
+  amounts?: MaterialAmount[];
   inStock: boolean;
   sortOrder: number;
   createdAt: string;
@@ -524,6 +527,7 @@ export async function listMaterials(onlyInStock = false): Promise<MaterialRecord
     material: String(r.material),
     visualHint: String(r.visual_hint),
     referenceImageUrl: MATERIAL_PACK_BY_ID.get(String(r.id))?.referenceImageUrl,
+    amounts: getMaterialAmounts(String(r.id)),
     inStock: Number(r.in_stock) === 1,
     sortOrder: Number(r.sort_order || 0),
     createdAt: String(r.created_at),

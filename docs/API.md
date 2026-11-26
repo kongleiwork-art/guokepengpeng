@@ -58,6 +58,7 @@
 - `GET /api/personas` (`session`) → `200` 返回全部 16 种 MBTI 人格公开字段（`id, name, mbti, tagline, materialHint, openingLine, featured`），**不返回内部 `prompt`**。
 - `GET /api/accessories` (`session`) → `200` 返回手作配饰选项列表。
   - 材料包条目含 `referenceImageUrl`，指向用于展示与生图的彩色材料图。
+  - `amounts` 是制作一只娃娃的备料建议，含数量、单位、领用或裁剪方式及厘米尺寸。照片分析和作品详情会在 `materialPlan` 中返回这些选材与用量。
   - 严格实材模式下仅返回有参考图的可用材料。
 - `GET /api/templates` (`session`) → `200` 返回预设兜底模板列表。
 
