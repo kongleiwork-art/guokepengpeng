@@ -10,7 +10,9 @@
   "functions": {
     "api/index.ts": {
       "maxDuration": 60,
-      "regions": ["hkg1"]
+      "regions": [
+        "hkg1"
+      ]
     },
     "api/task-worker.ts": {
       "maxDuration": 180,
@@ -22,9 +24,49 @@
           "retryAfterSeconds": 30
         }
       ]
+    },
+    "api/stepfun-check-hkg1.ts": {
+      "maxDuration": 25,
+      "regions": [
+        "hkg1"
+      ]
+    },
+    "api/stepfun-check-hnd1.ts": {
+      "maxDuration": 25,
+      "regions": [
+        "hnd1"
+      ]
+    },
+    "api/stepfun-check-sin1.ts": {
+      "maxDuration": 25,
+      "regions": [
+        "sin1"
+      ]
+    },
+    "api/stepfun-check-kix1.ts": {
+      "maxDuration": 25,
+      "regions": [
+        "kix1"
+      ]
     }
   },
   "rewrites": [
+    {
+      "source": "/__workshop-stepfun/kix1",
+      "destination": "/api/stepfun-check-kix1"
+    },
+    {
+      "source": "/__workshop-stepfun/sin1",
+      "destination": "/api/stepfun-check-sin1"
+    },
+    {
+      "source": "/__workshop-stepfun/hnd1",
+      "destination": "/api/stepfun-check-hnd1"
+    },
+    {
+      "source": "/__workshop-stepfun/hkg1",
+      "destination": "/api/stepfun-check-hkg1"
+    },
     {
       "source": "/api/:path*",
       "destination": "/api/index"
