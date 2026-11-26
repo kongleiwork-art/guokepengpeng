@@ -225,7 +225,7 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
   assert.deepEqual(brief.materialPlan.map(item => item.id), brief.suggestedMaterialIds);
   assert.equal(requests[0].model, 'step-5-preview');
   assert.equal(requests[0].reasoning_effort, 'low');
-  assert.equal(requests[0].max_tokens, 640);
+  assert.equal(requests[0].max_tokens, 1280);
   const prompt = requests[0].messages[1].content.find(part => part.type === 'text').text;
   assert.match(prompt, /photoStyle/);
   assert.doesNotMatch(prompt, /kit_|MBTI|dollDesign/);
@@ -238,7 +238,7 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
   assert.equal(requests.length, 1);
 });
 
-test('照片识别超时后换新时限重试，连续超时后结束', async (t) => {
+test('照片识别超时或结果截断后重试，连续超时后结束', async (t) => {
   const { config } = await import('../server/config.ts');
   const { requestStepFunJson } = await import('../server/providers/stepfun.ts');
   const isVercel = config.isVercel;
@@ -249,7 +249,10 @@ test('照片识别超时后换新时限重试，连续超时后结束', async (t
   t.mock.method(globalThis, 'fetch', async (_url, { body, signal }) => {
     assert.equal(signal.aborted, false);
     attempts.push({ body, signal });
-    if (attempts.length !== 2) await delay(5_000, undefined, { signal });
+    if (attempts.length === 5) {
+      return Response.json({ choices: [{ finish_reason: 'length', message: { content: '{"style":' } }] });
+    }
+    if (attempts.length !== 2 && attempts.length !== 6) await delay(5_000, undefined, { signal });
     return Response.json({ choices: [{ message: { content: JSON.stringify(observation) } }] });
   });
 
@@ -265,6 +268,10 @@ test('照片识别超时后换新时限重试，连续超时后结束', async (t
   await assert.rejects(analyze(), { status: 504, code: 'PROVIDER_TIMEOUT' });
   assert.equal(attempts.length, 4);
   assert.equal(attempts[2].body, attempts[3].body);
+
+  assert.deepEqual(await analyze(), observation);
+  assert.equal(attempts.length, 6);
+  assert.equal(attempts[4].body, attempts[5].body);
 });
 
 test('Step Plan 跨机房入口拒绝未签名、过期或被改动的请求', async (t) => {

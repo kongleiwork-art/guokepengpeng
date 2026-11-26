@@ -16,6 +16,21 @@ type StepFunRequest = {
   reasoning_effort?: 'low';
 };
 
+type StepFunCompletion = {
+  choices?: Array<{ finish_reason?: string; message?: { content?: unknown; refusal?: unknown } }>;
+};
+
+class InvalidStepFunOutput extends Error {
+  readonly code = 'PROVIDER_ERROR';
+  readonly status = 502;
+  readonly retryable: boolean;
+
+  constructor(message: string, retryable = true) {
+    super(message);
+    this.retryable = retryable;
+  }
+}
+
 const CONNECTION_TIMEOUT_CODES = new Set(['STEP_PLAN_CONNECT_TIMEOUT', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT']);
 const CONNECTION_ERROR_CODES = new Set([
   ...CONNECTION_TIMEOUT_CODES, 'ECONNRESET', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'ENOTFOUND',
@@ -68,6 +83,27 @@ function transportCode(error: unknown): string {
   return typeof code === 'string' ? code : error instanceof Error ? error.name : 'unknown';
 }
 
+function readStepFunObject<T>(payload: StepFunCompletion): T {
+  const choice = payload?.choices?.[0];
+  if (choice?.finish_reason === 'content_filter' || choice?.message?.refusal) {
+    throw new InvalidStepFunOutput('阶跃星辰未返回可用描述', false);
+  }
+  if (choice?.finish_reason === 'length') throw new InvalidStepFunOutput('阶跃星辰返回的分析不完整');
+  const text = choice?.message?.content;
+  if (typeof text !== 'string' || !text.trim()) throw new InvalidStepFunOutput('阶跃星辰未返回有效分析');
+  const json = text.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new InvalidStepFunOutput('阶跃星辰分析格式无效');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new InvalidStepFunOutput('阶跃星辰分析格式无效');
+  }
+  return parsed as T;
+}
+
 export async function requestStepFunJson<T>(
   system: string,
   user: Message['content'],
@@ -86,7 +122,6 @@ export async function requestStepFunJson<T>(
   const serialized = JSON.stringify(body);
   const deadline = options ? undefined : AbortSignal.timeout(hasImage ? 38_000 : 25_000);
   let post = postStepFun;
-  let payload: { choices?: Array<{ message?: { content?: unknown } }> };
   for (let attempt = 0; ; attempt++) {
     const signal = options ? AbortSignal.timeout(options.attemptTimeoutsMs[attempt]) : deadline!;
     let response: Response | undefined;
@@ -96,18 +131,18 @@ export async function requestStepFunJson<T>(
         void response.body?.cancel().catch(() => {});
         throw stepFunError(response.status);
       }
-      payload = await response.json();
-      break;
+      return readStepFunObject<T>(await response.json());
     } catch (error) {
       const code = transportCode(error);
       const timedOut = signal.aborted || response?.status === 504 || (!response && CONNECTION_TIMEOUT_CODES.has(code));
       const connectionFailed = (!response && CONNECTION_ERROR_CODES.has(code)) ||
         (error instanceof TypeError && (!response || Boolean(options && response.ok)));
       const gatewayFailed = [502, 503, 504].includes(response?.status ?? 0);
-      if (attempt === 0 && !deadline?.aborted && (timedOut || connectionFailed || gatewayFailed)) {
+      const incomplete = options && error instanceof InvalidStepFunOutput && error.retryable;
+      if (attempt === 0 && !deadline?.aborted && (timedOut || connectionFailed || gatewayFailed || incomplete)) {
         if (canRelayStepPlan()) post = postStepPlanViaRelay;
         console.warn('[stepfun] retrying analysis', process.env.VERCEL_REGION,
-          post === postStepPlanViaRelay ? 'alternate region' : 'same region', response?.status ?? code);
+          post === postStepPlanViaRelay ? 'alternate region' : 'same region', incomplete ? 'incomplete output' : response?.status ?? code);
         await wait(250);
         continue;
       }
@@ -119,19 +154,4 @@ export async function requestStepFunJson<T>(
       throw Object.assign(new Error(message), { code: timedOut ? 'PROVIDER_TIMEOUT' : 'PROVIDER_ERROR', status: timedOut ? 504 : 502 });
     }
   }
-
-  const text = payload?.choices?.[0]?.message?.content;
-  if (typeof text !== 'string' || !text.trim()) {
-    throw Object.assign(new Error('阶跃星辰未返回有效分析'), { code: 'PROVIDER_ERROR', status: 502 });
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    parsed = null;
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw Object.assign(new Error('阶跃星辰分析格式无效'), { code: 'PROVIDER_ERROR', status: 502 });
-  }
-  return parsed as T;
 }
