@@ -475,13 +475,17 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.equal(calls.review.length, 1);
   assert.equal(calls.review[0].model, 'step-5-preview');
   assert.equal(calls.review[0].reasoning_effort, 'low');
-  assert.equal(calls.review[0].max_tokens, 900);
+  assert.equal(calls.review[0].max_tokens, 1700);
   const [checklist, candidate] = calls.review[0].messages[1].content;
   assert.match(checklist.text, /带帽橡果.*头部/);
   assert.match(checklist.text, /云朵棉面料.*围巾或衣片/);
   assert.match(checklist.text, /眼睛2枚、鼻子1枚/);
   assert.equal(candidate.image_url.detail, 'low');
-  assert.equal(candidate.image_url.url, 'data:image/jpeg;base64,' + output.toString('base64'));
+  assert.match(candidate.image_url.url, /^data:image\/jpeg;base64,/);
+  const reviewImage = Buffer.from(candidate.image_url.url.split(',')[1], 'base64');
+  const { default: sharp } = await import('sharp');
+  const { width, height } = await sharp(reviewImage).metadata();
+  assert.ok(Math.max(width, height) <= 640 && reviewImage.length < output.length);
   assert.equal((await fetch(base + version.resultUrl)).status, 404);
   assert.equal((await owner(version.resultUrl)).status, 200);
 
