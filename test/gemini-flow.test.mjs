@@ -462,7 +462,7 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.equal(calls.image[0].auth, 'Bearer fixture');
   assert.match(calls.image[0].type, /multipart\/form-data/);
   assert.ok(!calls.image[0].body.includes(photo));
-  assert.ok(calls.image[0].body.includes(brief.photoStyle));
+  assert.ok(!calls.image[0].body.includes(brief.photoStyle));
   assert.ok(calls.image[0].body.includes(brief.dollDesign));
   assert.ok(calls.image[0].body.includes('gpt-image-2.6-flare'));
   assert.ok(calls.image[0].body.includes('Input image 1: 带帽橡果'));
