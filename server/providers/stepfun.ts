@@ -1,7 +1,6 @@
-import { request as httpsRequest } from 'node:https';
-import { Readable } from 'node:stream';
 import { setTimeout as wait } from 'node:timers/promises';
 import { config } from '../config.ts';
+import { canRelayStepPlan, postStepPlan, postStepPlanViaRelay, useStepPlanTransport } from './stepPlanTransport.ts';
 
 type ContentPart =
   | { type: 'text'; text: string }
@@ -17,44 +16,34 @@ type StepFunRequest = {
   reasoning_effort?: 'low';
 };
 
-export function requestStepFun(
-  body: StepFunRequest,
-  signal: AbortSignal,
-) {
+const CONNECTION_TIMEOUT_CODES = new Set(['STEP_PLAN_CONNECT_TIMEOUT', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT']);
+const CONNECTION_ERROR_CODES = new Set([
+  ...CONNECTION_TIMEOUT_CODES, 'ECONNRESET', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'ENOTFOUND',
+]);
+
+function postStepFun(body: string, signal: AbortSignal) {
+  if (useStepPlanTransport()) return postStepPlan(body, signal);
   return fetch(config.chatApiBase + '/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: 'Bearer ' + config.chatApiKey,
     },
-    body: JSON.stringify({ model: config.chatModel, ...body }),
+    body,
     signal,
   });
 }
 
-function requestStepFunOverIpv4(body: StepFunRequest, signal: AbortSignal): Promise<Response> {
+export async function requestStepFun(body: StepFunRequest, signal: AbortSignal) {
   const serialized = JSON.stringify({ model: config.chatModel, ...body });
-  return new Promise((resolve, reject) => {
-    const request = httpsRequest(config.chatApiBase + '/chat/completions', {
-      method: 'POST', family: 4, signal,
-      headers: {
-        Authorization: 'Bearer ' + config.chatApiKey,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(serialized),
-        'Accept-Encoding': 'identity',
-      },
-    }, message => {
-      const status = message.statusCode ?? 502;
-      if (status === 204 || status === 205 || status === 304) {
-        message.resume();
-        resolve(new Response(null, { status }));
-        return;
-      }
-      resolve(new Response(Readable.toWeb(message) as ReadableStream<Uint8Array>, { status }));
-    });
-    request.once('error', reject);
-    request.end(serialized);
-  });
+  try {
+    return await postStepFun(serialized, signal);
+  } catch (error) {
+    const code = transportCode(error);
+    if (signal.aborted || !canRelayStepPlan() || !CONNECTION_ERROR_CODES.has(code)) throw error;
+    console.warn('[stepfun] retrying connection across regions', process.env.VERCEL_REGION, code);
+    return postStepPlanViaRelay(serialized, signal);
+  }
 }
 
 export function stepFunError(status: number) {
@@ -88,21 +77,21 @@ export async function requestStepFunJson<T>(
   const hasImage = Array.isArray(user);
   const useLowEffort = hasImage && (model === 'step-3.7-flash' || model === 'step-5-preview');
   const body: StepFunRequest = {
-    ...(model ? { model } : {}),
+    model: model || config.chatModel,
     ...(useLowEffort ? { reasoning_effort: 'low' as const } : {}),
     messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
     response_format: { type: 'json_object' },
     max_tokens: options?.maxTokens ?? (hasImage ? 3600 : 2300),
   };
+  const serialized = JSON.stringify(body);
   const deadline = options ? undefined : AbortSignal.timeout(hasImage ? 38_000 : 25_000);
-  const canUseIpv4 = config.isVercel && config.chatApiBase === 'https://api.stepfun.com/step_plan/v1';
-  let transport = requestStepFun;
+  let post = postStepFun;
   let payload: { choices?: Array<{ message?: { content?: unknown } }> };
   for (let attempt = 0; ; attempt++) {
     const signal = options ? AbortSignal.timeout(options.attemptTimeoutsMs[attempt]) : deadline!;
     let response: Response | undefined;
     try {
-      response = await transport(body, signal);
+      response = await post(serialized, signal);
       if (!response.ok) {
         void response.body?.cancel().catch(() => {});
         throw stepFunError(response.status);
@@ -110,13 +99,15 @@ export async function requestStepFunJson<T>(
       payload = await response.json();
       break;
     } catch (error) {
-      const timedOut = signal.aborted || Boolean(options && response?.status === 504);
-      const connectionFailed = error instanceof TypeError && (!response || Boolean(options && response.ok));
+      const code = transportCode(error);
+      const timedOut = signal.aborted || response?.status === 504 || (!response && CONNECTION_TIMEOUT_CODES.has(code));
+      const connectionFailed = (!response && CONNECTION_ERROR_CODES.has(code)) ||
+        (error instanceof TypeError && (!response || Boolean(options && response.ok)));
       const gatewayFailed = [502, 503, 504].includes(response?.status ?? 0);
       if (attempt === 0 && !deadline?.aborted && (timedOut || connectionFailed || gatewayFailed)) {
+        if (canRelayStepPlan()) post = postStepPlanViaRelay;
         console.warn('[stepfun] retrying analysis', process.env.VERCEL_REGION,
-          timedOut ? 'PROVIDER_TIMEOUT' : response?.status ?? transportCode(error));
-        if (canUseIpv4 && (connectionFailed || timedOut)) transport = requestStepFunOverIpv4;
+          post === postStepPlanViaRelay ? 'alternate region' : 'same region', response?.status ?? code);
         await wait(250);
         continue;
       }
