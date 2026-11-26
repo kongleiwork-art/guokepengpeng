@@ -193,13 +193,8 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
     requests.push(JSON.parse(Buffer.concat(chunks)));
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
-      primaryMbti: 'INFP',
-      alternateMbtis: ['ENFP', 'ISFP'],
-      keywords: ['暖色', '安静'],
-      reason: '暖色组合适合故事收藏家的角色设定。',
+      style: 'soft',
       photoStyle: '画面有暖棕与浅米色。',
-      dollDesign: '以天然胡桃壳和浅色毛线搭出温暖的森林娃娃。',
-      suggestedMaterialIds: ['absent_material'],
     }) } }] }));
   });
   provider.listen(0, '127.0.0.1');
@@ -222,11 +217,17 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
   const brief = await json(await fetch(base + '/api/mbti/recommend', { method: 'POST', body: form }));
   assert.equal(brief.source, 'cloud_vision');
   assert.equal(brief.primaryPersonaId, 'persona_infp');
+  assert.deepEqual(brief.alternateMbtis, ['ISFJ', 'INFJ']);
   assert.match(brief.photoStyle, /暖棕/);
-  assert.match(brief.dollDesign, /核桃壳做身体/);
-  assert.ok(brief.suggestedMaterialIds.length > 0);
-  assert.ok(!brief.suggestedMaterialIds.includes('absent_material'));
+  assert.match(brief.dollDesign, /核桃壳做娃娃主体/);
+  assert.deepEqual(brief.suggestedMaterialIds, ['kit_walnut', 'kit_cloud_cotton', 'kit_teddy_wool', 'kit_toy_eyes_nose']);
+  assert.deepEqual(brief.materialPlan.map(item => item.id), brief.suggestedMaterialIds);
   assert.equal(requests[0].model, 'step-5-preview');
+  assert.equal(requests[0].reasoning_effort, 'low');
+  assert.equal(requests[0].max_tokens, 640);
+  const prompt = requests[0].messages[1].content.find(part => part.type === 'text').text;
+  assert.match(prompt, /photoStyle/);
+  assert.doesNotMatch(prompt, /kit_|MBTI|dollDesign/);
   const submittedImage = requests[0].messages[1].content.find(part => part.type === 'image_url');
   assert.equal(submittedImage.image_url.url, 'data:image/jpeg;base64,' + photo.toString('base64'));
 
@@ -234,6 +235,35 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
   assert.equal(closed.status, 403);
   assert.equal((await closed.json()).error.code, 'CREATION_CLOSED');
   assert.equal(requests.length, 1);
+});
+
+test('照片识别超时后换新时限重试，连续超时后结束', async (t) => {
+  const { config } = await import('../server/config.ts');
+  const { requestStepFunJson } = await import('../server/providers/stepfun.ts');
+  const isVercel = config.isVercel;
+  config.isVercel = false;
+  t.after(() => { config.isVercel = isVercel; });
+  const attempts = [];
+  const observation = { style: 'natural', photoStyle: '苔绿与浅棕的搭配。' };
+  t.mock.method(globalThis, 'fetch', async (_url, { body, signal }) => {
+    assert.equal(signal.aborted, false);
+    attempts.push({ body, signal });
+    if (attempts.length !== 2) await delay(5_000, undefined, { signal });
+    return Response.json({ choices: [{ message: { content: JSON.stringify(observation) } }] });
+  });
+
+  const analyze = () => requestStepFunJson('返回 JSON', [
+    { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + photo.toString('base64'), detail: 'low' } },
+  ], 'step-5-preview', { maxTokens: 640, attemptTimeoutsMs: [25, 35] });
+  assert.deepEqual(await analyze(), observation);
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].signal.aborted, true);
+  assert.notEqual(attempts[0].signal, attempts[1].signal);
+  assert.equal(attempts[0].body, attempts[1].body);
+
+  await assert.rejects(analyze(), { status: 504, code: 'PROVIDER_TIMEOUT' });
+  assert.equal(attempts.length, 4);
+  assert.equal(attempts[2].body, attempts[3].body);
 });
 
 test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { timeout: 30000 }, async (t) => {
@@ -257,8 +287,14 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
         return;
       }
       calls.chat.push(payload);
-      if (Array.isArray(payload.messages.at(-1).content) && ++portraitAttempts === 1) {
-        res.writeHead(503).end();
+      if (Array.isArray(payload.messages.at(-1).content)) {
+        if (++portraitAttempts === 1) {
+          res.writeHead(504).end();
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+          choices: [{ message: { content: '{"style":"playful","photoStyle":"浅棕底上有俏皮的彩色细节"}' } }],
+        }));
         return;
       }
       if (payload.messages.at(-1).content === '试试额度错误') {
@@ -269,7 +305,6 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
           choices: [{ message: { content: JSON.stringify({
             primaryMbti: 'ENFP', reason: '一起试试新点子。', alternateMbtis: ['INFP', 'ENFJ'], keywords: ['好奇'],
-            photoStyle: '苔绿色搭配浅棕色', dollDesign: '用浅棕橡果壳和苔绿织物做娃娃',
             suggestedMaterialIds: ['kit_capped_acorn', 'kit_cloud_cotton', 'kit_capped_acorn'],
           }) } }],
         }));
@@ -344,7 +379,8 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   const brief = await json(await owner('/api/mbti/recommend', { method: 'POST', body: portrait }));
   assert.equal(brief.source, 'cloud_vision');
   assert.equal(portraitAttempts, 2);
-  assert.deepEqual(brief.suggestedMaterialIds, ['kit_capped_acorn', 'kit_cloud_cotton']);
+  assert.deepEqual(calls.chat.filter(call => Array.isArray(call.messages.at(-1).content))[0], calls.chat.at(-1));
+  assert.deepEqual(brief.suggestedMaterialIds, ['kit_capped_acorn', 'kit_cloud_cotton', 'kit_color_check_bows', 'kit_toy_eyes_nose']);
   assert.deepEqual(brief.materialPlan.map(item => item.id), brief.suggestedMaterialIds);
   assert.deepEqual(brief.materialPlan[0].amounts, [{
     quantity: 1, unit: '颗', action: 'pick', size: { kind: 'height', cm: 2.5 },
@@ -401,7 +437,7 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.ok(calls.image[0].body.includes('The material list below is exhaustive'));
   assert.ok(calls.image[0].body.includes(acornArtwork));
   assert.ok(calls.image[0].body.includes(cottonArtwork));
-  assert.equal(calls.image[0].body.toString().match(/name="image\[\]"/g).length, 2);
+  assert.equal(calls.image[0].body.toString().match(/name="image\[\]"/g).length, brief.materialPlan.length);
   assert.equal(calls.review.length, 1);
   assert.equal(calls.review[0].model, 'step-5-preview');
   const [checklist, candidate] = calls.review[0].messages[1].content;

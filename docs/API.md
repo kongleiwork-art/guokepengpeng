@@ -140,7 +140,7 @@ data: {"code":"CHAT_TIMEOUT","message":"对话首字响应超过 10000ms 超时�
 - `GET /nfc/:alias` 返回 `302` 跳转到 `/d/:id/chat?entry=nfc&alias=...`。未绑定返回 `404`。
 - `POST /api/demo/nfc-tags/:alias/written` 接收 `{ url, scope }`。工坊核对标签读出的完整 URL 与当前环境的预期地址后登记时间。
 - 在 Vercel 配置 `IMAGE_GENERATION_ENABLED=true` 和云端生图密钥后开放生图和重生成。
-- `POST /api/mbti/recommend` 可接收一张照片并返回娃娃角色、材料、`photoStyle` 和 `dollDesign`。开启照片分析需配置 `STEPFUN_VISION_MODEL`，照片在应用后端内存中处理。关闭时，照片请求返回 `409 PHOTO_MBTI_UNAVAILABLE`。四题快测使用 JSON 请求。
+- `POST /api/mbti/recommend` 可接收一张照片。阶跃星辰识别画面风格，后端按工坊库存返回娃娃角色、`photoStyle`、`dollDesign` 及含数量与尺寸的 `materialPlan`。首次识别超时后会用同一张照片自动重试一次，两次超时返回 `504 PROVIDER_TIMEOUT`。开启照片分析需配置 `STEPFUN_VISION_MODEL`，照片在应用后端内存中处理。关闭时，照片请求返回 `409 PHOTO_MBTI_UNAVAILABLE`。四题快测使用 JSON 请求。
 - 重生成遇到上一次云端结果未确认时返回 `409 GENERATION_REVIEW_REQUIRED`。人工核对结果与费用后可发送 `reviewedUnknown: true`。
 
 

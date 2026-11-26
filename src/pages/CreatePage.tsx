@@ -192,7 +192,7 @@ export function CreatePage() {
     }
   };
 
-  const applyPersonaSelection = (targetIdOrMbti: string, suggestedMatIds?: string[]) => {
+  const applyPersonaSelection = (targetIdOrMbti: string, suggestedMatIds?: string[], availableMaterials = accessories) => {
     const matched = personas.find(
       (p) => p.id === targetIdOrMbti || p.mbti.toUpperCase() === targetIdOrMbti.toUpperCase()
     );
@@ -201,7 +201,7 @@ export function CreatePage() {
     setPersonaId(matched.id);
     if (!matched.featured) setShowAllPersonas(true);
     if (suggestedMatIds && suggestedMatIds.length > 0) {
-      const validIds = new Set(accessories.map((a) => a.id));
+      const validIds = new Set(availableMaterials.map((a) => a.id));
       const clean = suggestedMatIds.filter((id) => validIds.has(id)).slice(0, 6);
       if (clean.length > 0) setSelectedAccessories(clean);
     }
@@ -218,13 +218,20 @@ export function CreatePage() {
     setPendingAnalysis(source);
     try {
       const res = await api.recommendMbti(source === 'photo' ? { photo: photoFile } : { quizAnswers });
-      if (source === 'photo') setPhotoRecommendation(res);
-      else setRecommendation(res);
-      applyPersonaSelection(res.primaryPersonaId, res.suggestedMaterialIds);
+      if (source === 'photo') {
+        setPhotoRecommendation(res);
+        setStep(1);
+      } else {
+        setRecommendation(res);
+      }
+      applyPersonaSelection(res.primaryPersonaId, res.suggestedMaterialIds, res.materialPlan);
       haptic('success');
     } catch (err) {
       const connectionMessage = source === 'photo' ? '连接中断，照片已保留。联网后可重试分析' : '连接中断，联网后可重试测评';
-      setError(err instanceof ApiError ? err.message : connectionMessage);
+      const message = source === 'photo' && err instanceof ApiError && err.status === 504
+        ? '照片分析超时，照片已保留，可以稍后重试。'
+        : err instanceof ApiError ? err.message : connectionMessage;
+      setError(message);
     } finally {
       setPendingAnalysis(null);
     }
@@ -442,9 +449,13 @@ export function CreatePage() {
             disabled={photoPreparing || recommending || submitting}
             className="btn-capsule-primary inline-flex min-h-10 items-center justify-center gap-2 px-4 text-sm font-medium disabled:opacity-55">
             <Sparkles className="h-4 w-4" />
-            {pendingAnalysis === 'photo' ? '正在分析照片…' : photoRecommendError ? '重试分析' : '分析这张照片'}
+            {pendingAnalysis === 'photo' ? '正在准备娃娃方案…' : photoRecommendError ? '重试分析' : '分析这张照片'}
           </button>
-          <p className="text-xs leading-relaxed text-[#6E5C50]">确认后，将这张照片发送给阶跃星辰用于娃娃创作。</p>
+          {pendingAnalysis === 'photo' ? (
+            <p role="status" className="text-xs leading-relaxed text-[#6E5C50]">识别超时后会自动用这张照片再试一次。</p>
+          ) : (
+            <p className="text-xs leading-relaxed text-[#6E5C50]">确认后，将这张照片发送给阶跃星辰用于娃娃创作。</p>
+          )}
           {photoRecommendError && (
             <div className="space-y-2">
               <p role="alert" className="text-xs text-[#9E3D2E]">{photoRecommendError}</p>
