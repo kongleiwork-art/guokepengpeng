@@ -1,3 +1,5 @@
+import { request as httpsRequest } from 'node:https';
+import { Readable } from 'node:stream';
 import { setTimeout as wait } from 'node:timers/promises';
 import { config } from '../config.ts';
 
@@ -6,16 +8,17 @@ type ContentPart =
   | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' } };
 
 type Message = { role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] };
+type StepFunRequest = {
+  model?: string;
+  messages: Message[];
+  stream?: boolean;
+  max_tokens: number;
+  response_format?: { type: 'json_object' };
+  reasoning_effort?: 'low';
+};
 
 export function requestStepFun(
-  body: {
-    model?: string;
-    messages: Message[];
-    stream?: boolean;
-    max_tokens: number;
-    response_format?: { type: 'json_object' };
-    reasoning_effort?: 'low';
-  },
+  body: StepFunRequest,
   signal: AbortSignal,
 ) {
   return fetch(config.chatApiBase + '/chat/completions', {
@@ -26,6 +29,31 @@ export function requestStepFun(
     },
     body: JSON.stringify({ model: config.chatModel, ...body }),
     signal,
+  });
+}
+
+function requestStepFunOverIpv4(body: StepFunRequest, signal: AbortSignal): Promise<Response> {
+  const serialized = JSON.stringify({ model: config.chatModel, ...body });
+  return new Promise((resolve, reject) => {
+    const request = httpsRequest(config.chatApiBase + '/chat/completions', {
+      method: 'POST', family: 4, signal,
+      headers: {
+        Authorization: 'Bearer ' + config.chatApiKey,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(serialized),
+        'Accept-Encoding': 'identity',
+      },
+    }, message => {
+      const status = message.statusCode ?? 502;
+      if (status === 204 || status === 205 || status === 304) {
+        message.resume();
+        resolve(new Response(null, { status }));
+        return;
+      }
+      resolve(new Response(Readable.toWeb(message) as ReadableStream<Uint8Array>, { status }));
+    });
+    request.once('error', reject);
+    request.end(serialized);
   });
 }
 
@@ -46,26 +74,30 @@ export function stepFunError(status: number) {
 }
 
 function transportCode(error: unknown): string {
-  const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
-  return typeof cause?.code === 'string' ? cause.code : error instanceof Error ? error.name : 'unknown';
+  const failure = error as { code?: unknown; cause?: { code?: unknown } } | null;
+  const code = failure?.cause?.code ?? failure?.code;
+  return typeof code === 'string' ? code : error instanceof Error ? error.name : 'unknown';
 }
 
 export async function requestStepFunJson<T>(system: string, user: Message['content'], model?: string): Promise<T> {
   const hasImage = Array.isArray(user);
   const useLowEffort = hasImage && (model === 'step-3.7-flash' || model === 'step-5-preview');
-  const body = {
+  const body: StepFunRequest = {
     ...(model ? { model } : {}),
     ...(useLowEffort ? { reasoning_effort: 'low' as const } : {}),
-    messages: [{ role: 'system', content: system }, { role: 'user', content: user }] as Message[],
-    response_format: { type: 'json_object' as const },
+    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+    response_format: { type: 'json_object' },
     max_tokens: hasImage ? 3600 : 2300,
   };
   const deadline = AbortSignal.timeout(hasImage ? 38_000 : 25_000);
   const connect = async (): Promise<Response> => {
+    let useIpv4 = false;
     for (let attempt = 0; ; attempt++) {
-      const response = await requestStepFun(body, deadline).catch((error: unknown) => {
+      const transport = useIpv4 ? requestStepFunOverIpv4 : requestStepFun;
+      const response = await transport(body, deadline).catch((error: unknown) => {
         if (attempt > 0 || deadline.aborted || !(error instanceof TypeError)) throw error;
         console.warn('[stepfun] retrying connection', process.env.VERCEL_REGION, transportCode(error));
+        useIpv4 = config.isVercel && config.chatApiBase === 'https://api.stepfun.com/step_plan/v1';
         return null;
       });
       if (response && (attempt > 0 || ![502, 503, 504].includes(response.status))) return response;
