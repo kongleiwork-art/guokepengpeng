@@ -10,7 +10,7 @@
   "functions": {
     "api/index.ts": {
       "maxDuration": 60,
-      "regions": ["hkg1"]
+      "regions": ["kix1"]
     },
     "api/task-worker.ts": {
       "maxDuration": 180,
