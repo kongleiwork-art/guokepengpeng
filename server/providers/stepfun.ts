@@ -79,7 +79,12 @@ function transportCode(error: unknown): string {
   return typeof code === 'string' ? code : error instanceof Error ? error.name : 'unknown';
 }
 
-export async function requestStepFunJson<T>(system: string, user: Message['content'], model?: string): Promise<T> {
+export async function requestStepFunJson<T>(
+  system: string,
+  user: Message['content'],
+  model?: string,
+  options?: { maxTokens: number; attemptTimeoutsMs: readonly [number, number] },
+): Promise<T> {
   const hasImage = Array.isArray(user);
   const useLowEffort = hasImage && (model === 'step-3.7-flash' || model === 'step-5-preview');
   const body: StepFunRequest = {
@@ -87,35 +92,41 @@ export async function requestStepFunJson<T>(system: string, user: Message['conte
     ...(useLowEffort ? { reasoning_effort: 'low' as const } : {}),
     messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
     response_format: { type: 'json_object' },
-    max_tokens: hasImage ? 3600 : 2300,
+    max_tokens: options?.maxTokens ?? (hasImage ? 3600 : 2300),
   };
-  const deadline = AbortSignal.timeout(hasImage ? 38_000 : 25_000);
-  const connect = async (): Promise<Response> => {
-    let useIpv4 = false;
-    for (let attempt = 0; ; attempt++) {
-      const transport = useIpv4 ? requestStepFunOverIpv4 : requestStepFun;
-      const response = await transport(body, deadline).catch((error: unknown) => {
-        if (attempt > 0 || deadline.aborted || !(error instanceof TypeError)) throw error;
-        console.warn('[stepfun] retrying connection', process.env.VERCEL_REGION, transportCode(error));
-        useIpv4 = config.isVercel && config.chatApiBase === 'https://api.stepfun.com/step_plan/v1';
-        return null;
-      });
-      if (response && (attempt > 0 || ![502, 503, 504].includes(response.status))) return response;
-      await response?.body?.cancel().catch(() => {});
-      await wait(250, undefined, { signal: deadline });
-    }
-  };
+  const deadline = options ? undefined : AbortSignal.timeout(hasImage ? 38_000 : 25_000);
+  const canUseIpv4 = config.isVercel && config.chatApiBase === 'https://api.stepfun.com/step_plan/v1';
+  let transport = requestStepFun;
   let payload: { choices?: Array<{ message?: { content?: unknown } }> };
-  try {
-    const response = await connect();
-    if (!response.ok) throw stepFunError(response.status);
-    payload = await response.json();
-  } catch (error) {
-    if (!deadline.aborted && typeof (error as { status?: unknown })?.status === 'number') throw error;
-    const timedOut = deadline.aborted;
-    console.warn('[stepfun] analysis request failed', process.env.VERCEL_REGION, transportCode(error));
-    const message = timedOut ? '阶跃星辰分析超时，请重试' : '暂时无法连接阶跃星辰，请重试';
-    throw Object.assign(new Error(message), { code: timedOut ? 'PROVIDER_TIMEOUT' : 'PROVIDER_ERROR', status: timedOut ? 504 : 502 });
+  for (let attempt = 0; ; attempt++) {
+    const signal = options ? AbortSignal.timeout(options.attemptTimeoutsMs[attempt]) : deadline!;
+    let response: Response | undefined;
+    try {
+      response = await transport(body, signal);
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => {});
+        throw stepFunError(response.status);
+      }
+      payload = await response.json();
+      break;
+    } catch (error) {
+      const timedOut = signal.aborted || Boolean(options && response?.status === 504);
+      const connectionFailed = error instanceof TypeError && (!response || Boolean(options && response.ok));
+      const gatewayFailed = [502, 503, 504].includes(response?.status ?? 0);
+      if (attempt === 0 && !deadline?.aborted && (timedOut || connectionFailed || gatewayFailed)) {
+        console.warn('[stepfun] retrying analysis', process.env.VERCEL_REGION,
+          timedOut ? 'PROVIDER_TIMEOUT' : response?.status ?? transportCode(error));
+        if (canUseIpv4 && (connectionFailed || timedOut)) transport = requestStepFunOverIpv4;
+        await wait(250);
+        continue;
+      }
+      if (!timedOut && typeof (error as { status?: unknown })?.status === 'number') throw error;
+      console.warn('[stepfun] analysis request failed', process.env.VERCEL_REGION, transportCode(error));
+      const message = timedOut
+        ? (options ? '照片分析重试后仍超时，可以稍后重试' : '阶跃星辰分析超时，请重试')
+        : '暂时无法连接阶跃星辰，请重试';
+      throw Object.assign(new Error(message), { code: timedOut ? 'PROVIDER_TIMEOUT' : 'PROVIDER_ERROR', status: timedOut ? 504 : 502 });
+    }
   }
 
   const text = payload?.choices?.[0]?.message?.content;
