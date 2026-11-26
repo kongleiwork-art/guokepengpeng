@@ -296,6 +296,11 @@ export function CreatePage() {
   const visiblePersonas = showAllPersonas ? personas : featuredPersonas;
   const activePersona = personas.find((p) => p.id === personaId);
   const step1Done = Boolean(photoFile && userNickname.trim());
+  const selectedMaterials = selectedAccessories.flatMap(id => {
+    const material = photoRecommendation?.materialPlan?.find(item => item.id === id) ??
+      accessories.find(item => item.id === id);
+    return material ? [material] : [];
+  });
 
   const groupedMaterials = useMemo(() => {
     const groups = new Map<MaterialCategory, AccessoryOption[]>();
@@ -371,11 +376,7 @@ export function CreatePage() {
       templates.find(template => template.recommendedMbti.some(mbti =>
         personas.find(persona => persona.mbti === mbti)?.mbtiGroup === activePersona.mbtiGroup
       )) ?? templates[0];
-    const materials = selectedAccessories.flatMap(id => {
-      const item = accessories.find(accessory => accessory.id === id);
-      return item ? [item] : [];
-    });
-    const mainMaterial = materials.find(material => material.referenceImageUrl &&
+    const mainMaterial = selectedMaterials.find(material => material.referenceImageUrl &&
       (material.category === 'nut_body' || material.category === 'fruit_body'));
     const roles = [...new Set([photoRecommendation.primaryMbti, ...photoRecommendation.alternateMbtis, activePersona.mbti])];
     return (
@@ -407,7 +408,7 @@ export function CreatePage() {
           </div>
         </div>
         {usesSuggestedDesign && <p className="text-xs leading-relaxed text-[#6E5C50]">{photoRecommendation.reason}</p>}
-        {materials.length > 0 && <MaterialPlanList materials={materials} />}
+        {selectedMaterials.length > 0 && <MaterialPlanList materials={selectedMaterials} />}
         <div className="flex flex-wrap items-center gap-2" aria-label="调整娃娃性格">
           <span className="text-xs text-[#6E5C50]">换个性格</span>
           {roles.map(mbti => (
@@ -730,6 +731,10 @@ export function CreatePage() {
       </p>
 
       {renderMaterialPicker()}
+
+      {(!photoRecommendation || !isDesktop) && selectedMaterials.length > 0 && (
+        <MaterialPlanList materials={selectedMaterials} />
+      )}
 
       {/* Compact Configuration Summary */}
       <div className="p-3 rounded-xl studio-inset flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] text-[#6E5C50]">

@@ -107,7 +107,7 @@ export async function recommendMbti(input: {
   ).join('\n');
 
   const materialsCatalog = input.inStockMaterials
-    .map((m) => hasPhoto ? `${m.id}=${m.label}${m.referenceImageUrl ? '〔材料包〕' : ''}` : `${m.id}: ${m.label}（${m.material}）`)
+    .map((m) => hasPhoto ? `${m.id}=${m.label}（${materialPart(m.id, m.category)}）` : `${m.id}: ${m.label}（${m.material}）`)
     .join('\n');
 
   const quizDesc = hasQuiz && input.quizAnswers
@@ -133,7 +133,7 @@ export async function recommendMbti(input: {
     '3. keywords 返回 3 个简短温暖的中文氛围词（每个 2–5 字）。',
     '4. reason 用 2 句自然、有手作温度的中文解释为什么这个果壳人格和Ta很搭。',
     '5. suggestedMaterialIds 必须全部来自上面列出的 ID。',
-    hasPhoto ? '6. photoStyle 简述照片风格。dollDesign 用一句话说明所选材料分别做什么部位，只用 suggestedMaterialIds 对应的材料和它们已有的颜色。优先选一个果壳或果实作主体。照片仅提供角色灵感。' : '',
+    hasPhoto ? '6. photoStyle 简述照片风格。dollDesign 用一句话描述所选材料的部位和造型，只用 suggestedMaterialIds 对应的材料和已有颜色，按清单的部位用途搭配。数量与尺寸由工坊清单提供。优先选一个果壳或果实作主体。照片仅提供角色灵感。' : '',
   ].join('\n');
 
   const content = hasPhoto

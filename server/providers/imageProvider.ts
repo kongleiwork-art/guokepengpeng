@@ -14,6 +14,8 @@ import type { MaterialRecord } from '../db.ts';
 import { inspectImageBuffer } from '../utils/imageValidation.ts';
 import { writeMedia } from '../mediaStore.ts';
 import { materialPart } from '../../src/lib/materialCategories.ts';
+import { formatMaterialAmount } from '../../src/lib/materialAmounts.ts';
+import { getMaterialAmounts } from '../data/materialAmounts.ts';
 
 export interface DollBrief {
   photoStyle?: string;
@@ -67,9 +69,10 @@ export function buildDollImagePrompt(input: ImageGenerateInput, materialImageLab
       'A limbless or faceless craft ornament is valid. Keep the shell body directly on the surface when no limb part is listed. Omit eyes, a mouth, limbs, footwear, straps, and hardware unless the materials and listed uses support them.',
       input.photoStyle ? `Portrait mood note for pose and expression only: ${input.photoStyle}` : '',
       `The doll’s character is ${input.personaMbti} (${input.personaName}). Express this through arrangement and pose within the allowed parts.`,
-      ...input.selectedMaterials.map((material, index) =>
-        `Input image ${index + 1}: ${material.label} (${material.material}). Part: ${materialPart(material.id, material.category)}. Details: ${material.visualHint}`,
-      ),
+      ...input.selectedMaterials.map((material, index) => {
+        const amounts = (material.amounts ?? getMaterialAmounts(material.id)).map(formatMaterialAmount).join('。');
+        return `Input image ${index + 1}: ${material.label} (${material.material}). Part: ${materialPart(material.id, material.category)}. Details: ${material.visualHint}. Preparation for one doll: ${amounts}`;
+      }),
       input.dollDesign ? `Arrangement inspiration only, subject to the material list: ${input.dollDesign}` : '',
       'Keep the assembly feasible for hand craft. Show the whole doll and its material textures with gentle studio light. No text, graphic overlays, or watermark.',
     ].filter(Boolean).join('\n');

@@ -21,6 +21,7 @@ import {
   type MaterialCategory,
 } from '../data/seed.ts';
 import { MATERIAL_CATEGORY_LABELS } from '../../src/lib/materialCategories.ts';
+import { getMaterialAmounts } from '../data/materialAmounts.ts';
 import {
   db,
   getMaterialsByIds,
@@ -30,6 +31,7 @@ import {
   recordRunLog,
   selectMaterialPlan,
   setRuntimeSetting,
+  type MaterialRecord,
 } from '../db.ts';
 import {
   bindVisitorKey,
@@ -97,6 +99,14 @@ async function resolveMaterialLabels(ids: string[]): Promise<string[]> {
   const mats = await getMaterialsByIds(ids);
   if (mats.length > 0) return mats.map((m) => m.label);
   return [];
+}
+
+function formatMaterialOption(material: MaterialRecord) {
+  const { id, label, category, material: name, visualHint, referenceImageUrl, inStock, amounts } = material;
+  return {
+    id, label, category, categoryLabel: MATERIAL_CATEGORY_LABELS[category] || '手作材料',
+    material: name, visualHint, referenceImageUrl, inStock, amounts: amounts ?? getMaterialAmounts(id),
+  };
 }
 
 async function checkIdempotency<T = unknown>(
@@ -348,19 +358,7 @@ router.get('/personas', ensureSession, async (_req, res) => {
 router.get('/accessories', ensureSession, async (_req, res) => {
   const { strictMaterialConstraint } = await getRuntimeSettings();
   const inStockMaterials = await listCreationMaterials(strictMaterialConstraint);
-  sendSuccess(
-    res,
-    inStockMaterials.map((m) => ({
-      id: m.id,
-      label: m.label,
-      category: m.category,
-      categoryLabel: MATERIAL_CATEGORY_LABELS[m.category] || '手作材料',
-      material: m.material,
-      visualHint: m.visualHint,
-      referenceImageUrl: m.referenceImageUrl,
-      inStock: m.inStock,
-    }))
-  );
+  sendSuccess(res, inStockMaterials.map(formatMaterialOption));
 });
 
 router.get('/materials', ensureSession, async (_req, res) => {
@@ -425,7 +423,11 @@ router.post('/mbti/recommend', ensureSession, uploadPhoto, async (req, res) => {
       providerMode: settings.chatProviderMode,
       inStockMaterials,
     });
-    sendSuccess(res, result);
+    const materialPlan = photoBuffer ? result.suggestedMaterialIds.flatMap(id => {
+      const material = inStockMaterials.find(item => item.id === id);
+      return material ? [formatMaterialOption(material)] : [];
+    }) : undefined;
+    sendSuccess(res, { ...result, materialPlan });
   } catch (err: unknown) {
     const e = err as { status?: number; code?: string; message?: string };
     sendError(
@@ -1384,9 +1386,7 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
   const originalSettings = typeof settingsSnapshot === 'string'
     ? JSON.parse(settingsSnapshot) as ImageSettings | null
     : null;
-  const materialPlan = originalSettings?.materialPlan?.map(({ id, label, category, material, referenceImageUrl }) => ({
-    id, label, category, material, referenceImageUrl,
-  }));
+  const materialPlan = (originalSettings?.materialPlan ?? await getMaterialsByIds(parsedAccIds)).map(formatMaterialOption);
 
   sendSuccess(res, {
     id: card.id,
@@ -1400,7 +1400,7 @@ router.get('/cards/:id', ensureSession, async (req, res) => {
       materialHint: card.persona_material_hint,
     },
     accessoryIds: parsedAccIds,
-    accessoryLabels: materialPlan?.map(item => item.label) ?? await resolveMaterialLabels(parsedAccIds),
+    accessoryLabels: materialPlan.map(item => item.label),
     materialPlan,
     activeVersionId: card.active_version_id,
     boundDollId: card.bound_doll_id ?? null,
