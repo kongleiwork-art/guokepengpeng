@@ -67,7 +67,6 @@ export function buildDollImagePrompt(input: ImageGenerateInput, materialImageLab
       'The material list below is exhaustive. Use every selected material and add no other visible parts, props, paint, fabrics, or accessories. Leave out a feature if there is no selected material for it.',
       'Each input image is an approved material from the list. Preserve its shape, texture, and palette. Use one of the shown variants if a reference shows several.',
       'A limbless or faceless craft ornament is valid. Keep the shell body directly on the surface when no limb part is listed. Omit eyes, a mouth, limbs, footwear, straps, and hardware unless the materials and listed uses support them.',
-      input.photoStyle ? `Portrait mood note for pose and expression only: ${input.photoStyle}` : '',
       `The doll’s character is ${input.personaMbti} (${input.personaName}). Express this through arrangement and pose within the allowed parts.`,
       ...input.selectedMaterials.map((material, index) => {
         const amounts = (material.amounts ?? getMaterialAmounts(material.id)).map(formatMaterialAmount).join('。');

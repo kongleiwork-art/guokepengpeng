@@ -27,7 +27,7 @@ export async function verifyGeneratedMaterials(
       .toBuffer();
     review = await requestStepFunJson(
       '你负责成品材料验收。对照清单查找明显多出、缺少、用错材料或数量不符的部件，' +
-        '包括眼睛、鼻子、纽扣和四肢。忽略背景和阴影，厘米规格以备料清单为准。' +
+        '包括衣服、徽章、五官、纽扣和四肢。只忽略空白背景与阴影。画面中清单外的背景道具、徽章或额外衣服都属于出入。厘米规格以备料清单为准。' +
         '只返回 JSON，含 matches（布尔值）和 unmatchedParts（最多三条简短问题，无问题返回空数组）。',
       [
         { type: 'text', text: materialList },
