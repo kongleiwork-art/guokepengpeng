@@ -47,11 +47,7 @@ import {
 } from '../middleware/session.ts';
 import { getChatProvider } from '../providers/chatProvider.ts';
 import { recommendMbti, type MbtiQuizAnswers } from '../providers/mbtiAnalyzer.ts';
-import {
-  runMbtiGuideTurn,
-  type CognitiveFunctionScores,
-  type MbtiGuideHistoryItem,
-} from '../providers/mbtiGuideEngine.ts';
+import { runMbtiGuideTurn } from '../providers/mbtiGuideEngine.ts';
 import { validateImageBuffer } from '../utils/imageValidation.ts';
 import { deleteMedia, mediaExists, openMedia, writeMedia, type MediaKey } from '../mediaStore.ts';
 import { findNfcTarget } from '../nfc.ts';
@@ -419,6 +415,7 @@ router.post('/mbti/recommend', ensureSession, uploadPhoto, async (req, res) => {
     const result = await recommendMbti({
       photoBuffer,
       photoMime,
+      personaId: req.body?.personaId,
       quizAnswers,
       providerMode: settings.chatProviderMode,
       inStockMaterials,
@@ -442,42 +439,15 @@ router.post('/mbti/recommend', ensureSession, uploadPhoto, async (req, res) => {
 
 router.post('/mbti/guide/turn', ensureSession, async (req, res) => {
   try {
-    const rawHistory = Array.isArray(req.body?.history) ? req.body.history : [];
-    const history: MbtiGuideHistoryItem[] = rawHistory
-      .slice(0, 12)
-      .filter((item: unknown): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-      .map((item: Record<string, unknown>) => ({
-        questionId: typeof item.questionId === 'string' ? item.questionId.slice(0, 80) : 'q',
-        questionPrompt: typeof item.questionPrompt === 'string' ? item.questionPrompt.slice(0, 400) : '',
-        userAnswer: typeof item.userAnswer === 'string' ? item.userAnswer.slice(0, 600) : '',
-        selectedOptionId:
-          typeof item.selectedOptionId === 'string' ? item.selectedOptionId.slice(0, 80) : undefined,
-        optionWeights:
-          item.optionWeights && typeof item.optionWeights === 'object'
-            ? (item.optionWeights as Partial<CognitiveFunctionScores>)
-            : undefined,
-      }));
-
-    const rawScores =
-      req.body?.rawScores && typeof req.body.rawScores === 'object'
-        ? (req.body.rawScores as Partial<CognitiveFunctionScores>)
-        : undefined;
-    const maxRounds =
-      typeof req.body?.maxRounds === 'number' && Number.isFinite(req.body.maxRounds)
-        ? Math.max(4, Math.min(8, Math.round(req.body.maxRounds)))
-        : 5;
-    const forceConclude = Boolean(req.body?.forceConclude);
-
-    const settings = await getRuntimeSettings();
-    const inStockMaterials = await listCreationMaterials(settings.strictMaterialConstraint);
-    const result = await runMbtiGuideTurn({
-      history,
-      rawScores,
-      maxRounds,
-      forceConclude,
-      providerMode: settings.chatProviderMode,
-      inStockMaterials,
-    });
+    if (!Array.isArray(req.body?.answers)) {
+      sendError(req, res, 400, 'INVALID_SCENARIO_ANSWERS', '请刷新页面，重新打开情景测验。');
+      return;
+    }
+    let result = runMbtiGuideTurn(req.body.answers, []);
+    if (result.status === 'completed' && result.report.candidates.length) {
+      const settings = await getRuntimeSettings();
+      result = runMbtiGuideTurn(req.body.answers, await listCreationMaterials(settings.strictMaterialConstraint));
+    }
     sendSuccess(res, result);
   } catch (err: unknown) {
     const e = err as { status?: number; code?: string; message?: string };
@@ -486,7 +456,7 @@ router.post('/mbti/guide/turn', ensureSession, async (req, res) => {
       res,
       e.status || 502,
       e.code || 'PROVIDER_ERROR',
-      e.message || 'AI 人格引导分析失败，请稍后重试'
+      e.message || '情景测验暂时无法读取，请稍后重试'
     );
   }
 });

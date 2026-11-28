@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createClient } from '@libsql/client';
 import { createHmac } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -136,11 +137,21 @@ test('Gemini 参考图创作、绑定与首次初始化后重启', { timeout: 30
   assert.equal(calls.length, 3);
 
   await app.stop();
+  const legacy = createClient({ url: 'file:' + path.join(dir, 'test.sqlite') });
+  await legacy.batch([
+    "UPDATE app_settings SET value = '3' WHERE key = 'schema_version'",
+    "UPDATE personas SET recommended_materials = '[\"hat_gingham\"]' WHERE id = 'persona_enfp'",
+    "UPDATE materials SET in_stock = 0 WHERE id = 'kit_green_gauze'",
+  ], 'write');
+  legacy.close();
   const restarted = await startApp(t, dir, { GEMINI_API_KEY: '', IMAGE_PROVIDER: 'cloud' });
   base = restarted.base;
   assert.equal((await json(await owner(cardUrl))).boundDollId, bound.dollId);
   assert.equal((await json(await owner('/api/dolls'))).length, 5);
-  assert.equal((await json(await owner('/api/personas'))).length, 16);
+  const upgraded = await json(await owner('/api/personas'));
+  assert.equal(upgraded.length, 16);
+  assert.equal(upgraded.find(item => item.id === 'persona_enfp').recommendedMaterials[0], 'kit_capped_acorn');
+  assert.ok(!(await json(await owner('/api/accessories'))).some(item => item.id === 'kit_green_gauze'));
   const unconfigured = await owner('/api/cards', { method: 'POST', body: form });
   assert.equal(unconfigured.status, 503);
   assert.equal((await unconfigured.json()).error.code, 'PROVIDER_NOT_CONFIGURED');
@@ -188,13 +199,14 @@ test('公开预览在接收照片前关闭创作，NFC 入口直达聊天', { ti
 test('预览支持单张照片分析和娃娃方案，同时保留生图限制', { timeout: 20000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'nutshell-photo-analysis-'));
   const requests = [];
+  let proposedRole;
   const provider = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     requests.push(JSON.parse(Buffer.concat(chunks)));
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
-      style: 'soft',
+      style: 'soft', dollRole: proposedRole,
       photoStyle: '画面有暖棕与浅米色。',
     }) } }] }));
   });
@@ -236,6 +248,25 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
   assert.equal(closed.status, 403);
   assert.equal((await closed.json()).error.code, 'CREATION_CLOSED');
   assert.equal(requests.length, 1);
+  proposedRole = '守序者';
+  const solo = await json(await fetch(base + '/api/mbti/recommend', { method: 'POST', body: form }));
+  assert.equal(solo.primaryMbti, 'ISTJ');
+  assert.equal(solo.suggestedMaterialIds[0], 'kit_double_pod');
+  form.set('personaId', 'persona_isfp');
+  const confirmed = await json(await fetch(base + '/api/mbti/recommend', { method: 'POST', body: form }));
+  assert.equal(confirmed.primaryMbti, 'ISFP');
+  assert.deepEqual(confirmed.suggestedMaterialIds, ['kit_capped_acorn', 'kit_cloud_cotton', 'kit_hemp_twine', 'kit_toy_eyes_nose']);
+  form.set('personaId', 'invalid');
+  assert.equal((await fetch(base + '/api/mbti/recommend', { method: 'POST', body: form })).status, 400);
+  const post = (route, body) => fetch(base + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const guide = await json(await post('/api/mbti/guide/turn', { answers: [] }));
+  assert.equal(guide.answered, 0);
+  assert.equal(guide.total, 12);
+  assert.equal((await post('/api/mbti/recommend', { quizAnswers: { energy: 'E' } })).status, 400);
+  assert.equal((await json(await post('/api/mbti/recommend', {
+    quizAnswers: { energy: 'I', perception: 'S', judgment: 'T', lifestyle: 'J' },
+  }))).source, 'quiz_rule');
+  assert.equal(requests.length, 3);
 });
 
 test('照片识别超时或结果截断后重试，连续超时后结束', async (t) => {
@@ -406,7 +437,7 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   const quiz = await json(await post('/api/mbti/recommend', {
     quizAnswers: { energy: 'E', perception: 'N', judgment: 'F', lifestyle: 'P' },
   }));
-  assert.equal(quiz.source, 'cloud_quiz');
+  assert.equal(quiz.source, 'quiz_rule');
 
   const portrait = new FormData();
   portrait.set('photo', new Blob([photo], { type: 'image/jpeg' }), 'reference.jpg');
@@ -477,7 +508,7 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.equal(calls.review[0].reasoning_effort, 'low');
   assert.equal(calls.review[0].max_tokens, 1700);
   const [checklist, candidate] = calls.review[0].messages[1].content;
-  assert.match(checklist.text, /带帽橡果.*头部/);
+  assert.match(checklist.text, /带帽橡果.*娃娃主体，1颗/);
   assert.match(checklist.text, /云朵棉面料.*围巾或衣片/);
   assert.match(checklist.text, /眼睛2枚、鼻子1枚/);
   assert.equal(candidate.image_url.detail, 'low');

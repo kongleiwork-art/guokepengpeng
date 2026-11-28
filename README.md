@@ -24,15 +24,15 @@ Vite 构建前端。Express API 和 NFC 跳转运行在 Vercel Functions。预�
 | `BLOB_READ_WRITE_TOKEN` | 私有 Blob 读写，由 Vercel Storage 集成提供 |
 | `SESSION_SECRET` | 会话与队列消息的签名密钥，预览内固定以支持跨部署恢复 |
 | `DEMO_ADMIN_TOKEN` | `/dev` 工坊管理密钥 |
-| `STEPFUN_API_KEY`、`STEPFUN_CHAT_MODEL` | 阶跃星辰流式对话、四题快测和自适应访谈 |
+| `STEPFUN_API_KEY`、`STEPFUN_CHAT_MODEL` | 阶跃星辰流式对话和照片分析的服务端认证，聊天模型由后者指定 |
 | `STEPFUN_VISION_MODEL` | 照片分析使用的阶跃星辰视觉模型，预览使用 `step-5-preview` |
 | `IMAGE_GENERATION_ENABLED` | 设为 `true` 开放娃娃形象生成 |
 | `OPENAI_API_KEY` | GPT Image 的服务端密钥 |
 | `PREVIEW_APP_URL` | 固定 HTTPS 预览地址，用于测试贴纸和角色分享链接 |
 
-通过 `/api/health` 检查后端就绪情况。预览的 `/create` 可在设备端实时识别人像并自动抓拍。确认后发送一张照片给阶跃星辰，准备娃娃的角色、配色和配饰。填写称呼后，点击方案中的「生成娃娃形象」，即可以照片和当前方案作为参考生成作品。
+通过 `/api/health` 检查后端就绪情况。在 `/create` 点「拍照并分析」或「选照片并分析」，阶跃星辰会为虚构娃娃推荐角色与配色，页面直接显示方案和备料清单。觉得角色不像时可做情景题，采用结果后沿用照片配色更新材料。情景题和四题快测都按固定规则计分。
 
-取景使用 [MediaPipe Face Detector](https://developers.google.com/edge/mediapipe/solutions/vision/face_detector?tab=Web)。模型和运行文件随站点发布。
+摄像头在设备上用 MediaPipe Face Detector 筛选单人、稳定且清晰的画面，再用 Face Landmarker 检查候选帧的朝向与闭眼情况。模型和运行文件随站点发布。
 
 工坊材料图册包含团队素材包中的 55 种彩色材料图。已有数据库会追加这些条目，工坊可在 `/dev` 更新可用状态。严格实材模式只将本次选中的材料图交给生图服务。线上任务在保存成品前会用 StepFun 核对部件。
 
@@ -62,10 +62,9 @@ NODE_ENV=production npm start
 
 1. **打开首页 `/`**：查看 4 个预置展示娃娃，点击任意一个（如 `/d/demo-acorn`）可查看公开资料、固定链接二维码并进入 `/d/demo-acorn/chat` 进行真实流式对话。
 2. **前往 `/create` 创作个人娃娃**：
-   - 上传相册照片（JPEG/PNG/WebP）或切换“摄像头拍摄”（需 HTTPS 或 localhost）；客户端会自动校正方向并压缩至 2 MB 以内；
-   - 填写称呼（如：`小林`）；
-   - 选择人格（可展开全部 16 种 MBTI，默认推荐 4 个风格差异显著的角色）；
-   - 选择手作配饰（如：`苔绿手织围巾`、`黄铜细框眼镜`）；
+   - 选择「拍照并分析」或「选照片并分析」。摄像头需要 HTTPS 或 localhost，客户端自动校正照片方向并压缩到 2 MB 以内。
+   - 查看推荐角色、备料数量和尺寸。需要调整时点「感觉不像？做情景题」，也可在方案中更换在库材料。
+   - 填写称呼。
    - 点击 **生成娃娃形象**，自动跳转到 `/create/processing?cardId=...`（刷新页面按 `cardId` 恢复轮询，不重复提交）。
 3. **在 `/card/{cardId}` 查看版本、重生成与绑定**：
    - 查看生成结果、耗时与 `resultKind`（`generated` / `mock` / `template`），支持下载成品图；

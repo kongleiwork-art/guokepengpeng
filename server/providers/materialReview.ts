@@ -1,4 +1,4 @@
-import { materialPart } from '../../src/lib/materialCategories.ts';
+import { dollMaterialPart } from '../../src/lib/materialCategories.ts';
 import { config } from '../config.ts';
 import { getMaterialAmounts } from '../data/materialAmounts.ts';
 import type { MaterialRecord } from '../db.ts';
@@ -15,7 +15,7 @@ export async function verifyGeneratedMaterials(
   const materialList = materials.map(({ id, label, category, visualHint, amounts }) => {
     const quantities = (amounts ?? getMaterialAmounts(id))
       .map(({ part, quantity, unit }) => `${part ?? ''}${quantity}${unit}`).join('、');
-    return `- ${label}（${materialPart(id, category)}，${quantities}）。${visualHint}`;
+    return `- ${label}（${dollMaterialPart({ id, category }, materials)}，${quantities}）。${visualHint}`;
   }).join('\n');
   let review: { matches?: unknown; unmatchedParts?: unknown };
   try {

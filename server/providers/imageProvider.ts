@@ -13,7 +13,7 @@ import { FALLBACK_TEMPLATES, getAccessoryLabels } from '../data/seed.ts';
 import type { MaterialRecord } from '../db.ts';
 import { inspectImageBuffer } from '../utils/imageValidation.ts';
 import { writeMedia } from '../mediaStore.ts';
-import { materialPart } from '../../src/lib/materialCategories.ts';
+import { dollMaterialPart } from '../../src/lib/materialCategories.ts';
 import { formatMaterialAmount } from '../../src/lib/materialAmounts.ts';
 import { getMaterialAmounts } from '../data/materialAmounts.ts';
 
@@ -70,7 +70,7 @@ export function buildDollImagePrompt(input: ImageGenerateInput, materialImageLab
       `The doll’s character is ${input.personaMbti} (${input.personaName}). Express this through arrangement and pose within the allowed parts.`,
       ...input.selectedMaterials.map((material, index) => {
         const amounts = (material.amounts ?? getMaterialAmounts(material.id)).map(formatMaterialAmount).join('。');
-        return `Input image ${index + 1}: ${material.label} (${material.material}). Part: ${materialPart(material.id, material.category)}. Details: ${material.visualHint}. Preparation for one doll: ${amounts}`;
+        return `Input image ${index + 1}: ${material.label} (${material.material}). Part: ${dollMaterialPart(material, input.selectedMaterials)}. Details: ${material.visualHint}. Preparation for one doll: ${amounts}`;
       }),
       input.dollDesign ? `Arrangement inspiration only, subject to the material list: ${input.dollDesign}` : '',
       'Keep the assembly feasible for hand craft. Show the whole doll and its material textures with gentle studio light. No text, graphic overlays, or watermark.',

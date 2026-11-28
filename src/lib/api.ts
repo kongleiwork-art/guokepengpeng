@@ -13,11 +13,10 @@ import type {
   NfcWriteScope,
   MaterialCategory,
   MaterialRecord,
-  MbtiGuideHistoryItem,
+  MbtiScenarioAnswer,
   MbtiGuideTurnResponse,
   MbtiQuizAnswers,
   MbtiRecommendation,
-  CognitiveFunctionScores,
   MemoryItem,
   OutputJob,
   PersonaPublic,
@@ -137,7 +136,7 @@ export const api = {
     return requestJson<FallbackTemplate[]>('/api/templates', { signal });
   },
 
-  recommendMbti(input: { photo?: File | null; quizAnswers?: MbtiQuizAnswers }): Promise<MbtiRecommendation> {
+  recommendMbti(input: { photo?: File | null; personaId?: string; quizAnswers?: MbtiQuizAnswers }): Promise<MbtiRecommendation> {
     if (!input.photo) {
       return requestJson('/api/mbti/recommend', {
         method: 'POST',
@@ -149,6 +148,7 @@ export const api = {
     if (input.photo) {
       formData.append('photo', input.photo);
     }
+    if (input.personaId) formData.set('personaId', input.personaId);
     if (input.quizAnswers) {
       formData.append('quizAnswers', JSON.stringify(input.quizAnswers));
     }
@@ -158,16 +158,11 @@ export const api = {
     });
   },
 
-  mbtiGuideTurn(input: {
-    history: MbtiGuideHistoryItem[];
-    rawScores?: Partial<CognitiveFunctionScores>;
-    maxRounds?: number;
-    forceConclude?: boolean;
-  }): Promise<MbtiGuideTurnResponse> {
+  mbtiGuideTurn(answers: MbtiScenarioAnswer[]): Promise<MbtiGuideTurnResponse> {
     return requestJson<MbtiGuideTurnResponse>('/api/mbti/guide/turn', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
+      body: JSON.stringify({ answers }),
     });
   },
 
