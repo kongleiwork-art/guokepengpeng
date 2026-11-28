@@ -12,6 +12,7 @@ import {
 import { haptic } from '../lib/haptics';
 import { DollCabinetDrawer } from './DollCabinetDrawer';
 import { HomeBrandLetterHero } from './HomeBrandLetterHero';
+import { WorkshopMusic } from './WorkshopMusic';
 
 interface LayoutProps {
   children: ReactNode;
@@ -115,67 +116,9 @@ export function Layout({ children }: LayoutProps) {
     <div className="min-h-dvh flex flex-col journal-paper text-[#382A22]">
       {/* Unified Apple-Style Frosted Top Navigation Bar */}
       <header className="sticky top-0 z-30 ios-glass-bar border-b border-[#EAE2D6]/85">
-        {isHome ? (
-          /* Home: Golden 2-Zone Balance — Left Lively Brand Lockup + Right Doll Cabinet */
-          <div className="max-w-[1160px] mx-auto h-12 md:h-14 px-3.5 sm:px-8 flex items-center justify-between gap-4">
-            <HomeBrandLetterHero />
-
-            <button
-              type="button"
-              onClick={() => {
-                haptic('light');
-                setCabinetOpen(true);
-              }}
-              aria-label="打开娃娃收藏柜"
-              aria-expanded={cabinetOpen}
-              className="group inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs font-medium btn-ink-tinted whitespace-nowrap shrink-0"
-            >
-              {/* Bespoke Japanese Wooden Display Cabinet Icon */}
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                aria-hidden="true"
-                className="text-[#356B5F] transition-transform duration-200 group-hover:scale-105"
-              >
-                <rect
-                  x="3.5"
-                  y="3.5"
-                  width="17"
-                  height="17"
-                  rx="3.5"
-                  stroke="currentColor"
-                  strokeWidth="1.7"
-                />
-                <path
-                  d="M3.5 12H20.5"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                />
-                <path
-                  d="M12 3.5V12"
-                  stroke="currentColor"
-                  strokeWidth="1.4"
-                  strokeOpacity="0.65"
-                />
-                <circle cx="7.8" cy="8.2" r="1.45" fill="#C9963B" />
-                <circle cx="16.2" cy="8.2" r="1.45" fill="currentColor" fillOpacity="0.72" />
-                <path
-                  d="M8.5 16.4H15.5"
-                  stroke="currentColor"
-                  strokeWidth="1.6"
-                  strokeLinecap="round"
-                />
-              </svg>
-              <span className="text-[11.5px] sm:text-xs">收藏柜</span>
-            </button>
-          </div>
-        ) : (
-          /* Subpages & Root Secondary Tabs: Crisp 3-Zone iOS Nav Bar */
-          <div className="max-w-[1160px] mx-auto h-12 md:h-14 px-3.5 sm:px-8 grid grid-cols-3 items-center">
-            {/* Left slot: Back chevron on detail screens, Acorn Brand Mark on root tabs */}
+        <div className={`mx-auto h-12 max-w-[1160px] items-center px-3.5 sm:px-8 md:h-14 ${isHome
+          ? 'flex justify-between gap-2' : 'grid grid-cols-3'}`}>
+          {isHome ? <HomeBrandLetterHero /> : (
             <div className="flex items-center justify-start">
               {routeMeta.isRootTab ? (
                 <Link
@@ -232,20 +175,73 @@ export function Layout({ children }: LayoutProps) {
                 </button>
               )}
             </div>
-
-            {/* Center slot: Crisp iOS Nav Title */}
+          )}
+          {!isHome && (
             <div className="text-center font-editorial text-[16px] md:text-[17px] font-semibold tracking-tight text-[#382A22] truncate">
               {routeMeta.title}
             </div>
-
-            {/* Right slot: Quiet Atelier mark on desktop */}
-            <div className="flex items-center justify-end gap-2">
+          )}
+          <div className="flex items-center justify-end gap-1 sm:gap-2">
+            {isHome ? (
+              <button
+                type="button"
+                onClick={() => {
+                  haptic('light');
+                  setCabinetOpen(true);
+                }}
+                aria-label="打开娃娃收藏柜"
+                aria-expanded={cabinetOpen}
+                className="group inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs font-medium btn-ink-tinted whitespace-nowrap shrink-0"
+              >
+                {/* Bespoke Japanese Wooden Display Cabinet Icon */}
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                  className="text-[#356B5F] transition-transform duration-200 group-hover:scale-105"
+                >
+                  <rect
+                    x="3.5"
+                    y="3.5"
+                    width="17"
+                    height="17"
+                    rx="3.5"
+                    stroke="currentColor"
+                    strokeWidth="1.7"
+                  />
+                  <path
+                    d="M3.5 12H20.5"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
+                  <path
+                    d="M12 3.5V12"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeOpacity="0.65"
+                  />
+                  <circle cx="7.8" cy="8.2" r="1.45" fill="#C9963B" />
+                  <circle cx="16.2" cy="8.2" r="1.45" fill="currentColor" fillOpacity="0.72" />
+                  <path
+                    d="M8.5 16.4H15.5"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <span className="text-[11.5px] sm:text-xs">收藏柜</span>
+              </button>
+            ) : (
               <span className="hidden sm:inline font-atelier-num italic text-[13.5px] tracking-[0.06em] text-[#968477]">
                 NutShell Atelier
               </span>
-            </div>
+            )}
+            <WorkshopMusic />
           </div>
-        )}
+        </div>
       </header>
 
       {/* Main Content with bottom clearance for persistent Apple Bottom Tab Bar */}

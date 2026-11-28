@@ -16,6 +16,21 @@ interface ActivePlayback {
 }
 
 let activePlayback: ActivePlayback | null = null;
+const playbackListeners = new Set<(speaking: boolean) => void>();
+
+function setActivePlayback(next: ActivePlayback | null) {
+  const wasSpeaking = Boolean(activePlayback);
+  activePlayback = next;
+  if (wasSpeaking !== Boolean(next)) {
+    for (const listener of playbackListeners) listener(Boolean(next));
+  }
+}
+
+export function watchDollVoice(listener: (speaking: boolean) => void) {
+  playbackListeners.add(listener);
+  listener(Boolean(activePlayback));
+  return () => { playbackListeners.delete(listener); };
+}
 
 function getVoiceTuning(mbti?: string): { pitch: number; rate: number } {
   const code = (mbti || '').toUpperCase();
@@ -118,7 +133,7 @@ export function isSpeechSupported(): boolean {
 export function stopDollVoice(): void {
   if (activePlayback) {
     const prev = activePlayback;
-    activePlayback = null;
+    setActivePlayback(null);
     prev.cancel();
   }
   if (isSpeechSupported()) {
@@ -152,17 +167,17 @@ export function speakDollLine(
     let cancelled = false;
     const timer = window.setTimeout(() => {
       if (cancelled) return;
-      if (activePlayback?.id === id) activePlayback = null;
+      if (activePlayback?.id === id) setActivePlayback(null);
       callbacks.onEnd?.();
     }, durationMs);
 
-    activePlayback = {
+    setActivePlayback({
       id,
       cancel: () => {
         cancelled = true;
         window.clearTimeout(timer);
       },
-    };
+    });
     callbacks.onStart?.();
     return;
   }
@@ -194,7 +209,7 @@ export function speakDollLine(
         fallbackTimer = null;
       }
       if (activePlayback?.id === id) {
-        activePlayback = null;
+        setActivePlayback(null);
       }
       if (errored) {
         callbacks.onError?.();
@@ -239,7 +254,7 @@ export function speakDollLine(
       }
     }, maxWaitMs);
 
-    activePlayback = {
+    setActivePlayback({
       id,
       cancel: () => {
         if (settled) return;
@@ -254,11 +269,12 @@ export function speakDollLine(
           // ignore
         }
       },
-    };
+    });
 
     callbacks.onStart?.();
     synth.speak(utterance);
   } catch {
+    stopDollVoice();
     callbacks.onError?.();
   }
 }

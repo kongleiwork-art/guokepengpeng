@@ -2,6 +2,32 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ApiError, streamDollChat } from '../src/lib/api.ts';
 import { startTaskPolling } from '../src/lib/taskPolling.ts';
+import { speakDollLine, stopDollVoice, watchDollVoice } from '../src/lib/dollVoice.ts';
+
+test('更换、结束和手动停止娃娃语音都会释放配乐音量', (t) => {
+  const originalWindow = globalThis.window;
+  const timers = new Map();
+  let timer = 0;
+  globalThis.window = {
+    setTimeout(fn) { timers.set(++timer, fn); return timer; },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const levels = [];
+  const unsubscribe = watchDollVoice(speaking => levels.push(speaking));
+  t.after(() => {
+    unsubscribe();
+    stopDollVoice();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  speakDollLine('one', '来坐坐。');
+  speakDollLine('two', '我听着呢。');
+  assert.equal(timers.size, 1);
+  timers.get(timer)();
+  speakDollLine('three', '下次见。');
+  stopDollVoice();
+  assert.deepEqual(levels, [false, true, false, true, false, true, false]);
+});
 
 test('聊天连接早退会保留片段并通知重试', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => new Response(
