@@ -3,7 +3,7 @@ import test from 'node:test';
 import { SCENARIO_QUESTIONS, FOLLOW_UP_QUESTIONS } from '../server/data/mbtiQuestions.ts';
 import { runMbtiGuideTurn } from '../server/providers/mbtiGuideEngine.ts';
 import { PERSONA_SEEDS } from '../server/data/seed.ts';
-import { MATERIAL_PACK } from '../server/data/materialPack.ts';
+import { MATERIAL_PACK, materialConstructionHint } from '../server/data/materialPack.ts';
 import { composePhotoMaterials, recommendedMaterialIds } from '../src/lib/materialCategories.ts';
 import { getMaterialAmounts } from '../server/data/materialAmounts.ts';
 import { measureFacePixels, portraitPoseHint } from '../src/lib/portraitQuality.ts';
@@ -53,6 +53,8 @@ test('照片配色和选定角色使用同一份在库材料与部件表', () =>
   const role = PERSONA_SEEDS.find(item => item.mbti === 'ISTJ');
   const plan = composePhotoMaterials(role.recommendedMaterials, 'kit_green_gauze', MATERIAL_PACK, '浅苔绿');
   assert.match(plan.dollDesign, /绿色古风纱布选浅苔绿/);
+  assert.match(materialConstructionHint('kit_fabric_pieces', '大块布头选酒红色。'), /纯色酒红色/);
+  assert.match(materialConstructionHint('kit_hemp_twine'), /两段独立麻绳/);
   assert.deepEqual(plan.suggestedMaterialIds, ['kit_double_pod', 'kit_green_gauze', 'kit_coconut_buttons', 'kit_toy_eyes_nose']);
   assert.deepEqual(plan.materialPlan.map(item => item.id), plan.suggestedMaterialIds);
   for (const material of plan.materialPlan) assert.ok(plan.dollDesign.includes(material.label));

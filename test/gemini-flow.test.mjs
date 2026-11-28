@@ -507,7 +507,8 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.equal(calls.review[0].model, 'step-5-preview');
   assert.equal(calls.review[0].reasoning_effort, 'low');
   assert.equal(calls.review[0].max_tokens, 1700);
-  const [checklist, candidate] = calls.review[0].messages[1].content;
+  const [checklist, candidate, materialReferences] = calls.review[0].messages[1].content;
+  assert.match(checklist.text, /木质壳斗/);
   assert.match(checklist.text, /带帽橡果.*娃娃主体，1颗/);
   assert.match(checklist.text, /云朵棉面料.*围巾或衣片/);
   assert.match(checklist.text, /眼睛2枚、鼻子1枚/);
@@ -517,6 +518,12 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   const { default: sharp } = await import('sharp');
   const { width, height } = await sharp(reviewImage).metadata();
   assert.ok(Math.max(width, height) <= 640 && reviewImage.length < output.length);
+  assert.equal(materialReferences.image_url.detail, 'low');
+  const catalogImage = Buffer.from(materialReferences.image_url.url.split(',')[1], 'base64');
+  const catalogMetadata = await sharp(catalogImage).metadata();
+  assert.equal(catalogMetadata.width, 288);
+  assert.equal(catalogMetadata.height, 288);
+  assert.notDeepEqual(catalogImage, reviewImage);
   assert.equal((await fetch(base + version.resultUrl)).status, 404);
   assert.equal((await owner(version.resultUrl)).status, 200);
 

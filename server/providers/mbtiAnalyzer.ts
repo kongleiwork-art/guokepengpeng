@@ -1,5 +1,6 @@
 import { config, isPhotoMbtiEnabled } from '../config.ts';
 import { requestStepFunJson } from './stepfun.ts';
+import { PALETTE_FABRICS } from '../data/materialPack.ts';
 import { PERSONA_SEEDS } from '../data/seed.ts';
 import type { MaterialRecord } from '../db.ts';
 import { composePhotoMaterials, isDollBodyMaterial, recommendedMaterialIds } from '../../src/lib/materialCategories.ts';
@@ -24,16 +25,6 @@ function quizType(quiz?: MbtiQuizAnswers) {
 function invalidInput(message: string): never {
   throw Object.assign(new Error(message), { status: 400, code: 'INVALID_INPUT' });
 }
-
-const PALETTE_FABRICS: Record<string, { id: string; variant: string }> = {
-  green: { id: 'kit_green_gauze', variant: '浅苔绿' },
-  cream: { id: 'kit_cloud_cotton', variant: '奶油色' },
-  dark: { id: 'kit_fabric_pieces', variant: '深灰色' },
-  blue: { id: 'kit_fabric_pieces', variant: '藏蓝色' },
-  warm: { id: 'kit_fabric_pieces', variant: '酒红色' },
-  pastel: { id: 'kit_satin_gradient', variant: '柔和渐变色' },
-  patterned: { id: 'kit_fabric_scraps', variant: '细碎印花' },
-};
 
 export async function recommendMbti(input: {
   photoBuffer?: Buffer;
