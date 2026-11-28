@@ -88,7 +88,10 @@ function readStepFunObject<T>(payload: StepFunCompletion): T {
   if (choice?.finish_reason === 'content_filter' || choice?.message?.refusal) {
     throw new InvalidStepFunOutput('阶跃星辰未返回可用描述', false);
   }
-  if (choice?.finish_reason === 'length') throw new InvalidStepFunOutput('阶跃星辰返回的分析不完整');
+  if (choice?.finish_reason === 'length') {
+    console.warn('[stepfun] completion reached its output token limit');
+    throw new InvalidStepFunOutput('阶跃星辰返回的分析不完整');
+  }
   const text = choice?.message?.content;
   if (typeof text !== 'string' || !text.trim()) throw new InvalidStepFunOutput('阶跃星辰未返回有效分析');
   const json = text.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1');

@@ -13,7 +13,7 @@ import type { MaterialRecord } from '../db.ts';
 import { inspectImageBuffer } from '../utils/imageValidation.ts';
 import { writeMedia } from '../mediaStore.ts';
 import { materialConstructionHint } from '../data/materialPack.ts';
-import { resolveLocalAssetFile } from '../utils/assetFiles.ts';
+import { readMaterialArtwork, resolveLocalAssetFile } from '../utils/assetFiles.ts';
 import { dollMaterialPart } from '../../src/lib/materialCategories.ts';
 import { formatMaterialAmount } from '../../src/lib/materialAmounts.ts';
 import { getMaterialAmounts } from '../data/materialAmounts.ts';
@@ -124,7 +124,7 @@ async function loadMaterialReferenceImages(input: ImageGenerateInput, legacyLimi
   }
   const selected = input.useExactMaterialReferences ? files : files.slice(0, legacyLimit);
   return Promise.all(selected.map(async ({ id, label, mime, absPath }) => ({
-    id, label, mime, data: await fs.promises.readFile(absPath),
+    id, label, mime, data: await readMaterialArtwork(id, absPath, input.dollDesign),
   })));
 }
 

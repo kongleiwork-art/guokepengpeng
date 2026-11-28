@@ -506,7 +506,7 @@ test('StepFun SSE、GPT 生图的材料验收、会话隔离和任务幂等', { 
   assert.equal(calls.review.length, 1);
   assert.equal(calls.review[0].model, 'step-5-preview');
   assert.equal(calls.review[0].reasoning_effort, 'low');
-  assert.equal(calls.review[0].max_tokens, 1700);
+  assert.equal(calls.review[0].max_tokens, 3000);
   const [checklist, candidate, materialReferences] = calls.review[0].messages[1].content;
   assert.match(checklist.text, /木质壳斗/);
   assert.match(checklist.text, /带帽橡果.*娃娃主体，1颗/);
