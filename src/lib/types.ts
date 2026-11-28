@@ -85,74 +85,37 @@ export interface MbtiRecommendation {
   suggestedMaterialIds: string[];
   materialPlan?: AccessoryOption[];
   photoStyle?: string;
+  photoFabricId?: string;
+  photoFabricVariant?: string;
   dollDesign?: string;
-  source: 'cloud_vision' | 'cloud_quiz' | 'quiz_rule';
+  source: 'cloud_vision' | 'quiz_rule';
 }
 
-export type CognitiveFunction = 'Ni' | 'Ne' | 'Si' | 'Se' | 'Ti' | 'Te' | 'Fi' | 'Fe';
+export type MbtiAxis = 'EI' | 'SN' | 'TF' | 'JP';
+export type MbtiScenarioChoice = 'a' | 'lean-a' | 'both' | 'lean-b' | 'b';
 
-export type CognitiveFunctionScores = Record<CognitiveFunction, number>;
-
-export interface MbtiAxisPercentages {
-  E: number;
-  N: number;
-  F: number;
-  P: number;
-}
-
-export interface MbtiGuideOption {
+export interface MbtiScenarioQuestion {
   id: string;
-  label: string;
-  weights: Partial<CognitiveFunctionScores>;
-}
-
-export interface MbtiGuideQuestion {
-  id: string;
-  round: number;
-  phaseLabel: string;
-  targetAxes: string;
-  reaction?: string;
   prompt: string;
-  options: MbtiGuideOption[];
+  a: string;
+  b: string;
 }
 
-export interface MbtiGuideHistoryItem {
+export interface MbtiScenarioAnswer {
   questionId: string;
-  questionPrompt: string;
-  userAnswer: string;
-  selectedOptionId?: string;
-  optionWeights?: Partial<CognitiveFunctionScores>;
+  choice: MbtiScenarioChoice;
 }
 
 export interface MbtiGuideReport {
-  primaryMbti: string;
-  primaryPersonaId: string;
-  personaName: string;
-  confidence: number;
-  dominantStack: [CognitiveFunction, CognitiveFunction, CognitiveFunction, CognitiveFunction];
-  stackSummary: string;
-  functionScores: CognitiveFunctionScores;
-  axisPercentages: MbtiAxisPercentages;
-  alternateMbtis: Array<{ mbti: string; probability: number; personaName: string }>;
-  keywords: string[];
-  evidenceSummary: string;
-  disambiguationNote: string;
-  suggestedMaterialIds: string[];
+  primaryPersonaId?: string;
+  axes: Array<{ axis: MbtiAxis; score: number; balanced: boolean }>;
+  candidates: Array<{ personaId: string; mbti: string; name: string; suggestedMaterialIds: string[] }>;
 }
 
-export interface MbtiGuideTurnResponse {
-  status: 'questioning' | 'completed';
-  engine: 'stepfun_adaptive' | 'cat_local';
-  round: number;
-  maxRounds: number;
-  confidence: number;
-  topCandidates: Array<{ mbti: string; probability: number }>;
-  rawScores: CognitiveFunctionScores;
-  normalizedScores: CognitiveFunctionScores;
-  axisPercentages: MbtiAxisPercentages;
-  nextQuestion?: MbtiGuideQuestion;
-  report?: MbtiGuideReport;
-}
+export type MbtiGuideTurnResponse = { answered: number; total: number; baseTotal: number } & (
+  | { status: 'questioning'; nextQuestion: MbtiScenarioQuestion }
+  | { status: 'completed'; report: MbtiGuideReport }
+);
 
 export interface FallbackTemplate {
   id: string;

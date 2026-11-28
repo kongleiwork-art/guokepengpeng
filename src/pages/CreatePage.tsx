@@ -17,11 +17,11 @@ import type {
   PersonaPublic,
 } from '../lib/types';
 import { WatercolorPersonaGridSkeleton } from '../components/WatercolorLoader';
-import { MbtiAiGuidePanel } from '../components/MbtiAiGuidePanel';
+import { MbtiScenarioPanel, useScenarioQuiz } from '../components/MbtiScenarioPanel';
 import { PortraitCapture } from '../components/PortraitCapture';
 import { MaterialPlanList } from '../components/MaterialPlanList';
 import { haptic } from '../lib/haptics';
-import { defaultMaterialIds, MATERIAL_CATEGORY_LABELS } from '../lib/materialCategories';
+import { composePhotoMaterials, describeDollMaterials, recommendedMaterialIds, MATERIAL_CATEGORY_LABELS } from '../lib/materialCategories';
 
 type WizardStep = 1 | 2 | 3;
 
@@ -69,19 +69,30 @@ export function CreatePage() {
   const [quizAnswers, setQuizAnswers] = useState<MbtiQuizAnswers>({});
   const [personaToolsOpened, setPersonaToolsOpened] = useState(false);
 
+  const quizArea = useRef<HTMLDivElement>(null);
   const [step, setStep] = useState<WizardStep>(1);
   const [desktopRightTab, setDesktopRightTab] = useState<'persona' | 'accessories'>('persona');
 
   const [userNickname, setUserNickname] = useState('');
   const [personaId, setPersonaId] = useState('persona_enfp');
-  const [personaMode, setPersonaMode] = useState<'ai_guide' | 'manual' | 'quiz'>(
-    presetPersonaId ? 'manual' : 'ai_guide'
+  const [personaMode, setPersonaMode] = useState<'scenario' | 'manual' | 'quiz'>(
+    presetPersonaId ? 'manual' : 'scenario'
   );
-  const [aiGuideOpened, setAiGuideOpened] = useState(false);
+  const [scenarioOpened, setScenarioOpened] = useState(false);
+  const scenarioQuiz = useScenarioQuiz(scenarioOpened);
+  const confirmedRole = useRef<string | null>(null);
+  const roleRevision = useRef(0);
+  const manualMaterials = useRef(false);
+  const photoRevision = useRef(0);
+  const photoInFlight = useRef(false);
+  const quizInFlight = useRef(false);
+  const lastPhotoResult = useRef<MbtiRecommendation | null>(null);
   const [showAllPersonas, setShowAllPersonas] = useState(false);
   const [selectedAccessories, setSelectedAccessories] = useState<string[]>([]);
 
-  const [pendingAnalysis, setPendingAnalysis] = useState<'photo' | 'quiz' | null>(null);
+  const [photoAnalyzing, setPhotoAnalyzing] = useState(false);
+  const [quizScoring, setQuizScoring] = useState(false);
+  const pendingAnalysis = photoAnalyzing ? 'photo' : quizScoring ? 'quiz' : null;
   const recommending = pendingAnalysis !== null;
   const [recommendation, setRecommendation] = useState<MbtiRecommendation | null>(null);
   const [recommendError, setRecommendError] = useState<string | null>(null);
@@ -110,8 +121,8 @@ export function CreatePage() {
         setCreationEnabled(capabilities.imageGenerationEnabled);
         setPhotoMbtiEnabled(capabilities.photoMbtiEnabled);
         const startWithGuide = !capabilities.photoMbtiEnabled && !presetPersonaId;
-        setPersonaMode(startWithGuide ? 'ai_guide' : 'manual');
-        setAiGuideOpened(startWithGuide);
+        setPersonaMode(startWithGuide ? 'scenario' : 'manual');
+        setScenarioOpened(startWithGuide);
         await api.initSession();
         const [pList, aList, references] = await Promise.all([
           api.listPersonas(),
@@ -132,13 +143,8 @@ export function CreatePage() {
           if (!initialPersona.featured) {
             setShowAllPersonas(true);
           }
-          const validIds = new Set(aList.map((a) => a.id));
-          const recommended = (initialPersona.recommendedMaterials ?? []).filter((id) => validIds.has(id));
-          if (recommended.length > 0) {
-            setSelectedAccessories(recommended.slice(0, 3));
-          } else {
-            setSelectedAccessories(defaultMaterialIds(aList));
-          }
+          confirmedRole.current = matchedPreset?.id ?? null;
+          setSelectedAccessories(recommendedMaterialIds(initialPersona.recommendedMaterials, aList));
         }
       } catch (error) {
         if (active) setLoadError(error instanceof Error ? error.message : '定制页面暂时不可用');
@@ -160,6 +166,8 @@ export function CreatePage() {
   }, [photoRecommendation]);
 
   const clearPhoto = () => {
+    photoRevision.current += 1;
+    lastPhotoResult.current = null;
     setPhotoFile(null);
     setPhotoError(null);
     setPhotoRecommendError(null);
@@ -167,77 +175,110 @@ export function CreatePage() {
     idemKeyRef.current = generateIdempotencyKey('card');
   };
 
+  const forSelectedRole = (photo: MbtiRecommendation, role: PersonaPublic): MbtiRecommendation => ({
+    ...photo, primaryPersonaId: role.id, primaryMbti: role.mbti,
+    alternateMbtis: [...new Set([photo.primaryMbti, ...photo.alternateMbtis])].filter(mbti => mbti !== role.mbti).slice(0, 2),
+    reason: '沿用你选定的「' + role.name + '」，按照片的配色搭配在库布料。',
+    ...composePhotoMaterials(role.recommendedMaterials ?? [], photo.photoFabricId, accessories, photo.photoFabricVariant),
+  });
+
+  const applyPersonaSelection = (target: string, suggestedIds?: string[]) => {
+    const role = personas.find(item => item.id === target || item.mbti === target.toUpperCase());
+    if (!role) return;
+    confirmedRole.current = role.id;
+    roleRevision.current += 1;
+    manualMaterials.current = false;
+    setPersonaId(role.id);
+    if (!role.featured) setShowAllPersonas(true);
+    if (lastPhotoResult.current) {
+      const combined = forSelectedRole(lastPhotoResult.current, role);
+      setPhotoRecommendation(combined);
+      setSelectedAccessories(combined.suggestedMaterialIds);
+    } else {
+      setSelectedAccessories(recommendedMaterialIds(suggestedIds ?? role.recommendedMaterials, accessories));
+    }
+    idemKeyRef.current = generateIdempotencyKey('card');
+    haptic('selection');
+  };
+
+  const analyzePhoto = async (file: File, revision = photoRevision.current) => {
+    if (!photoMbtiEnabled || photoInFlight.current) return;
+    photoInFlight.current = true;
+    setPhotoAnalyzing(true);
+    setPhotoRecommendError(null);
+    try {
+      const result = await api.recommendMbti({ photo: file, personaId: confirmedRole.current ?? undefined });
+      if (revision !== photoRevision.current) return;
+      lastPhotoResult.current = result;
+      const role = personas.find(item => item.id === confirmedRole.current);
+      const combined = role && role.id !== result.primaryPersonaId ? forSelectedRole(result, role) : result;
+      setPhotoRecommendation(combined);
+      if (!role) setPersonaId(combined.primaryPersonaId);
+      if (!personas.find(item => item.id === combined.primaryPersonaId)?.featured) setShowAllPersonas(true);
+      if (!manualMaterials.current) setSelectedAccessories(combined.suggestedMaterialIds);
+      idemKeyRef.current = generateIdempotencyKey('card');
+      haptic('success');
+    } catch (err) {
+      if (revision === photoRevision.current) setPhotoRecommendError(err instanceof ApiError && err.status === 504
+        ? '照片分析超时，已保留原照片。点「重试分析」即可继续。'
+        : err instanceof ApiError ? err.message : '连接中断，照片已保留。联网后可重试分析。');
+    } finally {
+      photoInFlight.current = false;
+      setPhotoAnalyzing(false);
+    }
+  };
+
   const acceptImageBlob = async (blob: Blob) => {
-    setPhotoError(null);
     if (blob.size > 24 * 1024 * 1024) {
       setPhotoError('这张照片太大，请从相册选一张小于 24 MB 的照片。');
       return;
     }
+    const revision = ++photoRevision.current;
     setPhotoPreparing(true);
+    setPhotoError(null);
+    let file: File;
     try {
-      const compressed = await compressImageForUpload(blob);
-      if (compressed.size > 2 * 1024 * 1024) {
+      file = await compressImageForUpload(blob);
+      if (revision !== photoRevision.current) return;
+      if (file.size > 2 * 1024 * 1024) {
         setPhotoError('压缩后图片仍大于 2 MB，请换一张照片。');
         return;
       }
-      setPhotoFile(compressed);
+      setPhotoFile(file);
+      lastPhotoResult.current = null;
       setPhotoRecommendation(null);
       setPhotoRecommendError(null);
       idemKeyRef.current = generateIdempotencyKey('card');
       haptic('success');
     } catch {
-      setPhotoError('浏览器无法读取这张照片，请尝试 JPEG、PNG 或 WebP。');
+      if (revision === photoRevision.current) setPhotoError('浏览器无法读取这张照片，请尝试 JPEG、PNG 或 WebP。');
+      return;
     } finally {
-      setPhotoPreparing(false);
+      if (revision === photoRevision.current) setPhotoPreparing(false);
     }
+    if (photoMbtiEnabled) await analyzePhoto(file, revision);
   };
 
-  const applyPersonaSelection = (targetIdOrMbti: string, suggestedMatIds?: string[], availableMaterials = accessories) => {
-    const matched = personas.find(
-      (p) => p.id === targetIdOrMbti || p.mbti.toUpperCase() === targetIdOrMbti.toUpperCase()
-    );
-    if (!matched) return;
-    haptic('selection');
-    setPersonaId(matched.id);
-    if (!matched.featured) setShowAllPersonas(true);
-    if (suggestedMatIds && suggestedMatIds.length > 0) {
-      const validIds = new Set(availableMaterials.map((a) => a.id));
-      const clean = suggestedMatIds.filter((id) => validIds.has(id)).slice(0, 6);
-      if (clean.length > 0) setSelectedAccessories(clean);
-    }
-    idemKeyRef.current = generateIdempotencyKey('card');
-  };
-
-  const handleRecommend = async (source: 'photo' | 'quiz') => {
-    if (recommending) return;
-    const setError = source === 'photo' ? setPhotoRecommendError : setRecommendError;
-    setError(null);
-    if (source === 'photo' && (!photoMbtiEnabled || !photoFile || photoPreparing)) return;
-
-    haptic('medium');
-    setPendingAnalysis(source);
+  const scoreQuickQuiz = async () => {
+    if (quizInFlight.current) return;
+    const revision = roleRevision.current;
+    quizInFlight.current = true;
+    setQuizScoring(true);
+    setRecommendError(null);
     try {
-      const res = await api.recommendMbti(source === 'photo' ? { photo: photoFile } : { quizAnswers });
-      if (source === 'photo') {
-        setPhotoRecommendation(res);
-        setStep(1);
-      } else {
-        setRecommendation(res);
-      }
-      applyPersonaSelection(res.primaryPersonaId, res.suggestedMaterialIds, res.materialPlan);
-      haptic('success');
+      const result = await api.recommendMbti({ quizAnswers });
+      setRecommendation(result);
+      if (roleRevision.current === revision) applyPersonaSelection(result.primaryPersonaId, result.suggestedMaterialIds);
     } catch (err) {
-      const connectionMessage = source === 'photo' ? '连接中断，照片已保留。联网后可重试分析' : '连接中断，联网后可重试测评';
-      const message = source === 'photo' && err instanceof ApiError && err.status === 504
-        ? '照片分析超时，照片已保留，可以稍后重试。'
-        : err instanceof ApiError ? err.message : connectionMessage;
-      setError(message);
+      setRecommendError(err instanceof Error ? err.message : '连接中断，联网后可重试快测。');
     } finally {
-      setPendingAnalysis(null);
+      quizInFlight.current = false;
+      setQuizScoring(false);
     }
   };
 
   const toggleAccessory = (id: string) => {
+    manualMaterials.current = true;
     haptic('selection');
     setSelectedAccessories((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : prev.length < 6 ? [...prev, id] : prev
@@ -247,13 +288,10 @@ export function CreatePage() {
 
   const applyRecommendedMaterials = () => {
     if (!activePersona) return;
-    const validIds = new Set(accessories.map((a) => a.id));
-    const rec = (activePersona.recommendedMaterials ?? []).filter((id) => validIds.has(id));
-    if (rec.length > 0) {
-      haptic('success');
-      setSelectedAccessories(rec.slice(0, 6));
-      idemKeyRef.current = generateIdempotencyKey('card');
-    }
+    manualMaterials.current = true;
+    setSelectedAccessories(recommendedMaterialIds(activePersona.recommendedMaterials, accessories));
+    idemKeyRef.current = generateIdempotencyKey('card');
+    haptic('success');
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -283,8 +321,8 @@ export function CreatePage() {
       if (photoRecommendation?.photoStyle) {
         formData.set('photoStyle', photoRecommendation.photoStyle);
       }
-      if (photoRecommendation?.dollDesign && usesSuggestedDesign) {
-        formData.set('dollDesign', photoRecommendation.dollDesign);
+      if (photoRecommendation && selectedMaterials.length) {
+        formData.set('dollDesign', usesSuggestedDesign && photoRecommendation.dollDesign ? photoRecommendation.dollDesign : describeDollMaterials(selectedMaterials));
       }
 
       const res = await api.createCard(formData, idemKeyRef.current);
@@ -371,11 +409,31 @@ export function CreatePage() {
       </button>
       <p className="text-xs leading-relaxed text-[#6E5C50]">
         {selectedAccessories.length
-          ? '照片用于分析和准备娃娃方案。严格实材模式下，生图只参考选中的材料图，保存前会核对成品部件。'
+          ? '按这份清单里的实物参考图生成，保存前会核对部件。'
           : '选好材料后可以生成娃娃形象。'}
       </p>
     </div>
   );
+
+  const openSupportingQuiz = () => {
+    setPersonaToolsOpened(true);
+    setScenarioOpened(true);
+    setPersonaMode('scenario');
+    setDesktopRightTab('persona');
+    setStep(2);
+    requestAnimationFrame(() => quizArea.current?.scrollIntoView({ block: 'start' }));
+  };
+
+  const adoptScenarioRole = (id: string, materials: string[]) => {
+    applyPersonaSelection(id, materials);
+    if (photoRecommendation) {
+      setStep(1);
+      setPersonaToolsOpened(false);
+      requestAnimationFrame(() => draftRef.current?.scrollIntoView({ block: 'center' }));
+    }
+  };
+
+  const showWorkshopTools = !photoMbtiEnabled || personaToolsOpened || Boolean(presetPersonaId);
 
   const renderPreparedDoll = () => {
     if (!photoRecommendation || !activePersona) return null;
@@ -385,13 +443,12 @@ export function CreatePage() {
       )) ?? templates[0];
     const mainMaterial = selectedMaterials.find(material => material.referenceImageUrl &&
       (material.category === 'nut_body' || material.category === 'fruit_body'));
-    const roles = [...new Set([photoRecommendation.primaryMbti, ...photoRecommendation.alternateMbtis, activePersona.mbti])];
     return (
       <section ref={draftRef} aria-labelledby="doll-draft-title"
         className="space-y-4 rounded-2xl border border-[#D8E6DF] bg-[#F3F8F4] p-4">
         <div>
           <h2 id="doll-draft-title" className="font-editorial text-lg font-semibold text-[#382A22]">娃娃方案已准备</h2>
-          <p className="mt-1 text-xs leading-relaxed text-[#6E5C50]">性格是娃娃的创作设定，可以按你的喜好调整。</p>
+          <p className="mt-1 text-xs leading-relaxed text-[#6E5C50]">照片提供造型灵感，角色性格可以由你调整。</p>
         </div>
         <div className="grid items-start gap-3 min-[440px]:grid-cols-[6rem_minmax(0,1fr)]">
           {mainMaterial?.referenceImageUrl ? (
@@ -407,23 +464,17 @@ export function CreatePage() {
             </figure>
           )}
           <div className="space-y-2">
-            <p className="text-sm font-semibold text-[#382A22]">{activePersona.name} · {activePersona.mbti}</p>
+            <p className="text-sm font-semibold text-[#382A22]">{confirmedRole.current ? '已选角色' : '照片推荐'} · {activePersona.name} · {activePersona.mbti}</p>
             <p className="text-sm leading-relaxed text-[#524339]">{photoRecommendation.photoStyle}</p>
             <p className="text-sm leading-relaxed text-[#524339]">
-              {usesSuggestedDesign ? photoRecommendation.dollDesign : activePersona.tagline}
+              {usesSuggestedDesign ? photoRecommendation.dollDesign : describeDollMaterials(selectedMaterials)}
             </p>
           </div>
         </div>
         {usesSuggestedDesign && <p className="text-xs leading-relaxed text-[#6E5C50]">{photoRecommendation.reason}</p>}
         {selectedMaterials.length > 0 && <MaterialPlanList materials={selectedMaterials} />}
-        <div className="flex flex-wrap items-center gap-2" aria-label="调整娃娃性格">
-          <span className="text-xs text-[#6E5C50]">换个性格</span>
-          {roles.map(mbti => (
-            <button key={mbti} type="button" disabled={submitting} aria-pressed={activePersona.mbti === mbti}
-              className="btn-paper-soft min-h-8 px-2.5 text-xs font-mono aria-pressed:bg-[#D8EBE3]"
-              onClick={() => applyPersonaSelection(mbti)}>{mbti}</button>
-          ))}
-        </div>
+        <button type="button" disabled={submitting || recommending} onClick={openSupportingQuiz}
+          className="btn-paper-soft min-h-10 px-3 text-sm text-[#3D7267]">感觉不像？做情景题</button>
         <details className="space-y-2 border-t border-[#D8E6DF] pt-2">
           <summary className="cursor-pointer text-xs font-medium text-[#3D7267]">
             调整材料 · 已选 {selectedAccessories.length}/6
@@ -440,12 +491,12 @@ export function CreatePage() {
   const renderPortraitTools = () => (
     <div className="space-y-4">
       <PortraitCapture photoUrl={photoPreviewUrl} busy={photoPreparing || recommending || submitting}
-        onPhoto={acceptImageBlob} onClear={clearPhoto} />
+        analyzeOnCapture={photoMbtiEnabled} onPhoto={acceptImageBlob} onClear={clearPhoto} />
 
       {photoError && <p role="alert" className="text-xs text-[#9E3D2E]">{photoError}</p>}
       {photoMbtiEnabled && photoFile && !photoRecommendation && (
         <div className="space-y-2">
-          <button type="button" onClick={() => void handleRecommend('photo')}
+          <button type="button" onClick={() => void analyzePhoto(photoFile)}
             disabled={photoPreparing || recommending || submitting}
             className="btn-capsule-primary inline-flex min-h-10 items-center justify-center gap-2 px-4 text-sm font-medium disabled:opacity-55">
             <Sparkles className="h-4 w-4" />
@@ -459,9 +510,9 @@ export function CreatePage() {
           {photoRecommendError && (
             <div className="space-y-2">
               <p role="alert" className="text-xs text-[#9E3D2E]">{photoRecommendError}</p>
-              {creationEnabled && !isDesktop && (
-                <button type="button" onClick={() => setStep(2)} className="btn-paper-soft min-h-9 px-3 text-xs">
-                  继续手动选性格
+              {photoMbtiEnabled && (
+                <button type="button" onClick={openSupportingQuiz} className="btn-paper-soft min-h-9 px-3 text-xs">
+                  用情景题选角色
                 </button>
               )}
             </div>
@@ -503,7 +554,7 @@ export function CreatePage() {
   );
 
   const renderPersonaStep = () => (
-    <div className="space-y-3.5">
+    <div ref={quizArea} className="space-y-3.5">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-baseline gap-2">
           <span className="font-atelier-num italic text-[14px] text-[#4A8276]">02.</span>
@@ -512,22 +563,21 @@ export function CreatePage() {
           </h2>
         </div>
 
-        {/* Mode Switcher: AI Guided Interview vs Direct 16-MBTI Picker */}
         <div className="inline-flex items-center rounded-xl bg-[#F2ECE2] p-0.5 border border-[#E5DCCD]">
           <button
             type="button"
             onClick={() => {
               haptic('selection');
-              setPersonaMode('ai_guide');
-              setAiGuideOpened(true);
+              setPersonaMode('scenario');
+              setScenarioOpened(true);
             }}
             className={`px-2.5 py-1 text-[11.5px] font-medium rounded-lg transition-colors whitespace-nowrap ${
-              personaMode === 'ai_guide'
+              personaMode === 'scenario'
                 ? 'bg-white text-[#2C6155] shadow-xs'
                 : 'text-[#7D6C5F] hover:text-[#382A22]'
             }`}
           >
-            AI 引导测评
+            情景测验
           </button>
           <button type="button" onClick={() => { setRecommendError(null); setPersonaMode('quiz'); }}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium ${personaMode === 'quiz' ? 'bg-white text-[#382A22]' : 'text-[#7D6C5F]'}`}>
@@ -551,8 +601,8 @@ export function CreatePage() {
       </div>
 
       {/* Keep interview progress when switching tabs after opening it. */}
-      <div className={personaMode === 'ai_guide' ? 'block space-y-3' : 'hidden'}>
-        {aiGuideOpened && <MbtiAiGuidePanel onApplyPersona={applyPersonaSelection} />}
+      <div className={personaMode === 'scenario' ? 'block space-y-3' : 'hidden'}>
+        {scenarioOpened && <MbtiScenarioPanel quiz={scenarioQuiz} appliedId={confirmedRole.current} onApplyPersona={adoptScenarioRole} />}
       </div>
 
       {personaMode === 'quiz' && (
@@ -564,7 +614,7 @@ export function CreatePage() {
                 {options.map(([value, label]) => (
                   <label key={value} className="flex items-center gap-1.5 px-1 py-1 text-xs text-[#6E5C50]">
                     <input type="radio" name={`personality-${key}`} value={value} checked={quizAnswers[key] === value}
-                      onChange={() => setQuizAnswers((current) => ({ ...current, [key]: value }))} />
+                      disabled={quizScoring} onChange={() => { setRecommendation(null); setQuizAnswers(current => ({ ...current, [key]: value })); }} />
                     {label}
                   </label>
                 ))}
@@ -573,7 +623,7 @@ export function CreatePage() {
           ))}
           <button type="button" className="btn-ink-tinted px-4 py-2 text-xs"
             disabled={recommending || Object.keys(quizAnswers).length !== QUIZ_QUESTIONS.length}
-            onClick={() => void handleRecommend('quiz')}>
+            onClick={() => void scoreQuickQuiz()}>
             {recommending ? '分析中…' : '查看推荐人格'}
           </button>
           {recommendError && <p role="alert" className="text-xs text-[#9E3D2E]">{recommendError}</p>}
@@ -581,7 +631,6 @@ export function CreatePage() {
         </section>
       )}
 
-      {/* Mode B: Direct 16-MBTI Picker + Optional Selfie Analysis */}
       {personaMode === 'manual' && (
         <div className="space-y-3.5">
           <div className="p-3 rounded-2xl bg-[#F7F3EB]/90 border border-[#E6DDD0] space-y-2.5">
@@ -694,7 +743,7 @@ export function CreatePage() {
         <div className="space-y-2">
           <blockquote className="atelier-pullquote px-3.5 py-2.5 text-[12px] text-[#6E5C50] leading-relaxed">
             <span className="font-medium text-[#382A22]">
-              当前已选 {activePersona.mbti} · {activePersona.name} 开场白：
+              当前娃娃 {activePersona.mbti} · {activePersona.name} 开场白：
             </span>
             “{activePersona.openingLine}”
           </blockquote>
@@ -785,7 +834,7 @@ export function CreatePage() {
           {loadError
             ? <p role="alert" className="text-sm text-[#6E5C50]">{loadError}</p>
             : <p className="text-sm text-[#6E5C50]">
-                {photoMbtiEnabled ? '在设备上实时取景，选好照片后准备娃娃的性格、配色和配饰。' : '可以先测果壳娃娃人格，或去展馆和演示娃娃聊天。'}
+                {photoMbtiEnabled ? '在设备上实时取景，拍好照片就能查看娃娃方案和备料清单。' : '可以先测果壳娃娃人格，或去展馆和演示娃娃聊天。'}
               </p>}
           <Link to="/plaza" className="inline-block text-sm font-medium text-[#3D7267]">逛果壳展馆</Link>
         </section>
@@ -801,13 +850,7 @@ export function CreatePage() {
             {renderMaterialPicker()}
           </details>
         )}
-        {!loadError && (photoMbtiEnabled ? (
-          <details className="studio-card rounded-[20px] p-4 sm:p-5"
-            onToggle={event => { if (event.currentTarget.open) setPersonaToolsOpened(true); }}>
-            <summary className="cursor-pointer text-sm font-medium text-[#3D7267]">通过问答挑选性格</summary>
-            {personaToolsOpened && <div className="mt-4">{renderPersonaStep()}</div>}
-          </details>
-        ) : <section className="studio-card rounded-[20px] p-5">{renderPersonaStep()}</section>)}
+        {!loadError && showWorkshopTools && <section className="studio-card rounded-[20px] p-5">{renderPersonaStep()}</section>}
       </div>
     );
   }
@@ -815,7 +858,7 @@ export function CreatePage() {
   return (
     <div className="max-w-[1160px] mx-auto px-3.5 sm:px-8 py-3 sm:py-6 space-y-3.5 sm:space-y-5">
       {/* Mobile Native 3-Step Segmented Wizard Bar (lg:hidden) */}
-      <div className="lg:hidden ios-segmented grid grid-cols-3">
+      {showWorkshopTools && <div className="lg:hidden ios-segmented grid grid-cols-3">
         {(
           [
             { key: 1 as const, label: '1 照片称呼', done: step1Done },
@@ -852,15 +895,15 @@ export function CreatePage() {
             </button>
           );
         })}
-      </div>
+      </div>}
 
       <form onSubmit={handleSubmit}>
         {/* Mobile One-Screen Step Card (rendered only on <1024px so AI Guide mounts once & preserves progress) */}
         {!isDesktop && (
           <div className="studio-card rounded-[20px] p-4 space-y-4">
-            {step === 1 && renderPhotoAndNickname()}
-            <div className={step === 2 ? 'block' : 'hidden'}>{renderPersonaStep()}</div>
-            <div className={step === 3 ? 'block' : 'hidden'}>{renderAccessoriesStep()}</div>
+            {(step === 1 || !showWorkshopTools) && renderPhotoAndNickname()}
+            {showWorkshopTools && <div className={step === 2 ? 'block' : 'hidden'}>{renderPersonaStep()}</div>}
+            {showWorkshopTools && <div className={step === 3 ? 'block' : 'hidden'}>{renderAccessoriesStep()}</div>}
 
             {submitError && (
               <div role="alert" className="p-3 rounded-xl border border-[#E5B8B0] bg-[#FDF2F0] text-xs text-[#9E3D2E]">
@@ -868,7 +911,7 @@ export function CreatePage() {
               </div>
             )}
 
-            <div className="pt-3 border-t border-[#EFE7DC] flex items-center justify-between gap-2.5">
+            {showWorkshopTools && <div className="pt-3 border-t border-[#EFE7DC] flex items-center justify-between gap-2.5">
               {step > 1 ? (
                 <button
                   type="button"
@@ -882,7 +925,7 @@ export function CreatePage() {
                   <span>上一步</span>
                 </button>
               ) : (
-                <span className="text-[11px] text-[#9A887B]">共 3 步 · AI 精准引导</span>
+                <span className="text-[11px] text-[#9A887B]">共 3 步</span>
               )}
 
               {step < 3 ? (
@@ -900,13 +943,13 @@ export function CreatePage() {
               ) : (
                 renderGenerateAction()
               )}
-            </div>
+            </div>}
           </div>
         )}
 
         {/* Desktop Compact Single-Screen 2-Column Studio (rendered only on >=1024px) */}
         {isDesktop && (
-          <div className="grid grid-cols-12 gap-6 items-start">
+          <div className={showWorkshopTools ? 'grid grid-cols-12 gap-6 items-start' : 'mx-auto max-w-2xl'}>
             <section className="col-span-5 studio-card rounded-[20px] p-6 space-y-5">
               {renderPhotoAndNickname()}
               {submitError && (
@@ -914,10 +957,10 @@ export function CreatePage() {
                   {submitError}
                 </div>
               )}
-              {!photoRecommendation && renderGenerateAction()}
+              {!photoRecommendation && showWorkshopTools && renderGenerateAction()}
             </section>
 
-            <section className="col-span-7 studio-card rounded-[20px] p-6 space-y-5">
+            {showWorkshopTools && <section className="col-span-7 studio-card rounded-[20px] p-6 space-y-5">
               <div className="flex items-center justify-between gap-4 border-b border-[#EFE7DC] pb-4">
                 <div>
                   <h1 className="font-editorial text-xl font-semibold text-[#382A22]">
@@ -967,7 +1010,7 @@ export function CreatePage() {
               <div className={desktopRightTab === 'accessories' ? 'block' : 'hidden'}>
                 {renderAccessoriesStep()}
               </div>
-            </section>
+            </section>}
           </div>
         )}
       </form>

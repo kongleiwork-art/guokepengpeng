@@ -51,7 +51,7 @@ async function ensureColumnExists(table: string, column: string, definition: str
 }
 
 let initialization: ReturnType<typeof initialize> | undefined;
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 export function initDatabase() {
   initialization ??= initialize().catch((error) => {
@@ -82,6 +82,17 @@ async function initialize(): Promise<{ recoveredRunningVersions: number; recover
     }
     if (version < 2) await installMaterialPack();
     if (version < 3) await migrateSessionAndUsage();
+    if (version < 4) {
+      const rows = PERSONA_SEEDS.map(() => '(?, ?, ?, ?)').join(', ');
+      await db.prepare(`
+        WITH kits(id, hint, visual_trait, materials) AS (VALUES ${rows})
+        UPDATE personas SET material_hint = kits.hint, visual_trait = kits.visual_trait,
+          recommended_materials = kits.materials,
+          tagline = CASE WHEN personas.id = 'persona_esfp' AND personas.tagline = '走起路来一串铃响'
+                    THEN '总能带大家玩起来' ELSE personas.tagline END
+        FROM kits WHERE kits.id = personas.id
+      `).run(...PERSONA_SEEDS.flatMap(p => [p.id, p.materialHint, p.visualTrait, JSON.stringify(p.recommendedMaterials)]));
+    }
     await db.prepare(
       "INSERT INTO app_settings (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     ).run(String(SCHEMA_VERSION));

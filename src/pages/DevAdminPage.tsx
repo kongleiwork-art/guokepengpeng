@@ -1379,7 +1379,7 @@ export function DevAdminPage() {
                     <div className="p-3 rounded-xl studio-inset space-y-1">
                       <div className="font-semibold text-[#382A22]">2. 16 型 MBTI 深度区分</div>
                       <p className="text-[11px] text-[#6E5C50] leading-relaxed">
-                        16 人格均配置独立认知功能轴、语态口癖禁忌与视觉神态特征，支持自拍 AI 气质分析与 15 秒 4 题快测。
+                        16 个角色各有说话风格与材料搭配。情景题按固定规则计分，照片分析提供配色参考。
                       </p>
                     </div>
                     <div className="p-3 rounded-xl studio-inset space-y-1">

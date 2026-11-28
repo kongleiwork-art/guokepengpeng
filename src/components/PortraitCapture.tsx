@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { Camera, ImagePlus, ScanFace } from 'lucide-react';
-import type { FaceDetector } from '@mediapipe/tasks-vision';
+import type { PortraitDetectors } from '../lib/portraitDetector';
+import { copyVideoFrame, createFaceSampler, portraitPoseHint } from '../lib/portraitQuality';
 
 type CaptureStage = 'idle' | 'opening' | 'loading' | 'scanning' | 'manual' | 'capturing';
 
 interface PortraitCaptureProps {
   photoUrl: string | null;
   busy: boolean;
+  analyzeOnCapture: boolean;
   onPhoto: (blob: Blob) => Promise<void>;
   onClear: () => void;
 }
@@ -22,15 +24,15 @@ function cameraAccessMessage(error: unknown): string {
   return '摄像头暂时无法打开，可以重试或从相册选照片。';
 }
 
-export function PortraitCapture({ photoUrl, busy, onPhoto, onClear }: PortraitCaptureProps) {
+export function PortraitCapture({ photoUrl, busy, analyzeOnCapture, onPhoto, onClear }: PortraitCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const camera = useRef<{
     revision: number;
     stream: MediaStream | null;
-    detector: FaceDetector | null;
+    detectors: PortraitDetectors | null;
     frameId: number;
-  }>({ revision: 0, stream: null, detector: null, frameId: 0 });
+  }>({ revision: 0, stream: null, detectors: null, frameId: 0 });
   const [stage, setStage] = useState<CaptureStage>('idle');
   const [hint, setHint] = useState(idleHint);
   const [inFrame, setInFrame] = useState(false);
@@ -40,9 +42,9 @@ export function PortraitCapture({ photoUrl, busy, onPhoto, onClear }: PortraitCa
     current.revision += 1;
     cancelAnimationFrame(current.frameId);
     current.stream?.getTracks().forEach(track => track.stop());
-    current.detector?.close();
+    current.detectors?.close();
     current.stream = null;
-    current.detector = null;
+    current.detectors = null;
     current.frameId = 0;
     if (videoRef.current) videoRef.current.srcObject = null;
   };
@@ -65,17 +67,10 @@ export function PortraitCapture({ photoUrl, busy, onPhoto, onClear }: PortraitCa
     };
   }, []);
 
-  const takePhoto = async (video: HTMLVideoElement) => {
+  const takePhoto = async (source: HTMLVideoElement | HTMLCanvasElement) => {
     let revision = camera.current.revision;
     try {
-      const canvas = document.createElement('canvas');
-      const scale = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight));
-      canvas.width = Math.round(video.videoWidth * scale);
-      canvas.height = Math.round(video.videoHeight * scale);
-      const context = canvas.getContext('2d');
-      if (!context || !canvas.width || !canvas.height) throw new Error('No frame');
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
+      const canvas = source instanceof HTMLCanvasElement ? source : copyVideoFrame(source);
       releaseCamera();
       revision = camera.current.revision;
       setInFrame(false);
@@ -91,11 +86,11 @@ export function PortraitCapture({ photoUrl, busy, onPhoto, onClear }: PortraitCa
     }
   };
 
-  const scanFrames = (detector: FaceDetector, video: HTMLVideoElement, revision: number) => {
+  const scanFrames = (models: PortraitDetectors, video: HTMLVideoElement, revision: number) => {
+    const measure = createFaceSampler();
     let nextSampleAt = 0;
     let lastVideoTime = -1;
-    let steadySince: number | null = null;
-    let lastCenter: { x: number; y: number } | null = null;
+    let stable: { x: number; y: number; width: number; since: number; frames: number; bestScore: number; best: HTMLCanvasElement } | null = null;
 
     const scan = (now: number) => {
       if (camera.current.revision !== revision) return;
@@ -103,37 +98,44 @@ export function PortraitCapture({ photoUrl, busy, onPhoto, onClear }: PortraitCa
         nextSampleAt = now + 170;
         lastVideoTime = video.currentTime;
         try {
-          const { detections } = detector.detectForVideo(video, now);
+          const { detections } = models.detector.detectForVideo(video, now);
           const box = detections.length === 1 ? detections[0].boundingBox : undefined;
-          const center = box ? {
-            x: (box.originX + box.width / 2) / video.videoWidth,
-            y: (box.originY + box.height / 2) / video.videoHeight,
-          } : null;
-          const centered = Boolean(box && center && box.width / video.videoWidth >= 0.13 &&
-            center.x > 0.25 && center.x < 0.75 && center.y > 0.18 && center.y < 0.82);
-
-          setInFrame(centered);
-          if (!centered || !center) {
-            steadySince = null;
-            lastCenter = null;
-            setHint(detections.length > 1 ? '请让一位体验者留在画面里。' :
-              box ? '请靠近一点，把脸移到取景框中央。' : '正在寻找人像，请看向镜头。');
-          } else {
-            const moved = lastCenter && Math.hypot(center.x - lastCenter.x, center.y - lastCenter.y) > 0.07;
-            if (steadySince === null || moved) steadySince = now;
-            lastCenter = center;
-            setHint('已识别人像，请保持一秒。');
-            if (now - steadySince >= 850) {
-              void takePhoto(video);
-              return;
+          const x = box ? (box.originX + box.width / 2) / video.videoWidth : 0;
+          const y = box ? (box.originY + box.height / 2) / video.videoHeight : 0;
+          let hint = detections.length > 1 ? '请让一位体验者留在画面里。' : !box ? '正在寻找人像，请看向镜头。'
+            : box.width / video.videoWidth < 0.13 || x < 0.25 || x > 0.75 || y < 0.18 || y > 0.82
+            ? '请靠近一点，把脸移到取景框中央。' : '';
+          if (box && !hint) {
+            const quality = measure(video, box);
+            hint = quality.hint;
+            if (!hint) {
+              if (!stable || Math.hypot(x - stable.x, y - stable.y) > 0.06 || Math.abs(box.width / stable.width - 1) > 0.2) {
+                stable = { x, y, width: box.width, since: now, frames: 0, bestScore: -1, best: document.createElement('canvas') };
+              }
+              stable.frames++;
+              if (quality.sharpness > stable.bestScore) {
+                copyVideoFrame(video, stable.best);
+                stable.bestScore = quality.sharpness;
+              }
+              if (stable.frames >= 4 && now - stable.since >= 850) {
+                const best = stable.best;
+                hint = portraitPoseHint(models.landmarker.detect(best), best.width, best.height);
+                if (!hint) {
+                  void takePhoto(best);
+                  return;
+                }
+              }
             }
           }
+          if (hint) stable = null;
+          setInFrame(!hint);
+          setHint(hint || '画面清晰，请保持一秒。');
         } catch {
-          detector.close();
-          camera.current.detector = null;
+          models.close();
+          camera.current.detectors = null;
           setInFrame(false);
           setStage('manual');
-          setHint('当前设备的人像识别不可用，可以手动拍一张。');
+          setHint('当前设备无法自动抓拍，可以手动拍一张。');
           return;
         }
       }
@@ -176,18 +178,21 @@ export function PortraitCapture({ photoUrl, busy, onPhoto, onClear }: PortraitCa
     setStage('loading');
     setHint('正在载入人像识别…');
     try {
-      const { createPortraitDetector } = await import('../lib/portraitDetector');
-      const detector = await createPortraitDetector();
+      const { createPortraitDetectors } = await import('../lib/portraitDetector');
+      if (camera.current.revision !== revision) return;
+      const models = await createPortraitDetectors();
       if (camera.current.revision !== revision) {
-        detector.close();
+        models.close();
         return;
       }
-      camera.current.detector = detector;
+      camera.current.detectors = models;
       setStage('scanning');
       setHint('正在寻找人像，请看向镜头。');
-      scanFrames(detector, video, revision);
+      scanFrames(models, video, revision);
     } catch {
       if (camera.current.revision === revision) {
+        camera.current.detectors?.close();
+        camera.current.detectors = null;
         setStage('manual');
         setHint('当前设备的人像识别不可用，可以手动拍一张。');
       }
@@ -225,10 +230,13 @@ export function PortraitCapture({ photoUrl, busy, onPhoto, onClear }: PortraitCa
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#312822] px-5 text-center text-[#FFF9F0]">
                 <ScanFace className="h-7 w-7 opacity-80" aria-hidden="true" />
                 <p className="max-w-[26ch] text-sm leading-relaxed" role="status">{hint}</p>
+                {stage === 'idle' && analyzeOnCapture && <p className="max-w-[32ch] text-xs text-[#E9DDCD]">
+                  拍好或选好后，这张照片会发给阶跃星辰，推荐娃娃角色和用料。
+                </p>}
                 {stage === 'idle' && (
                   <button type="button" disabled={busy} onClick={() => void startCamera()}
                     className="inline-flex min-h-10 items-center gap-2 rounded-full bg-[#FFF9F0] px-4 text-sm font-semibold text-[#382A22] hover:bg-white">
-                    <Camera className="h-4 w-4" /> 开启摄像头
+                    <Camera className="h-4 w-4" /> {analyzeOnCapture ? '拍照并分析' : '开启摄像头'}
                   </button>
                 )}
               </div>
@@ -244,10 +252,10 @@ export function PortraitCapture({ photoUrl, busy, onPhoto, onClear }: PortraitCa
             移除照片
           </button>
         )}
-        {stage === 'manual' && (
+        {live && (
           <button type="button" onClick={() => {
             if (videoRef.current?.videoWidth) void takePhoto(videoRef.current);
-          }} className="btn-ink-tinted min-h-9 px-3 text-xs">手动拍摄</button>
+          }} className="btn-ink-tinted min-h-9 px-3 text-xs">{analyzeOnCapture ? '手动拍照并分析' : '手动拍摄'}</button>
         )}
         {(live || stage === 'opening') && (
           <button type="button" onClick={() => stopCamera()} className="btn-paper-soft min-h-9 px-3 text-xs">
@@ -256,7 +264,7 @@ export function PortraitCapture({ photoUrl, busy, onPhoto, onClear }: PortraitCa
         )}
         <button type="button" onClick={chooseFromAlbum} disabled={busy || stage === 'capturing'}
           className="btn-paper-soft inline-flex min-h-9 items-center gap-1.5 px-3 text-xs">
-          <ImagePlus className="h-4 w-4" /> 从相册选择
+          <ImagePlus className="h-4 w-4" /> {analyzeOnCapture ? '选照片并分析' : '从相册选择'}
         </button>
       </div>
     </div>
