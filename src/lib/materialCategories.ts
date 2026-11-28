@@ -30,7 +30,7 @@ const PART_BY_MATERIAL: Record<string, string> = {
   kit_fabric_scraps: '拼布片',
   kit_waxed_cord: '系带',
   kit_suede_cord: '系带',
-  kit_hemp_twine: '绳臂或系带',
+  kit_hemp_twine: '左右绳臂（各一段）',
   kit_toy_eyes_nose: '眼睛和鼻子',
   kit_resin_eyes: '眼睛',
   kit_resin_glasses: '眼镜',

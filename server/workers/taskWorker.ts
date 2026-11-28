@@ -203,7 +203,7 @@ async function processImageVersion(versionId: string): Promise<void> {
 
     let resultUrl: string;
     if (result.resultKind === 'generated') {
-      if (shouldReviewMaterials) await verifyGeneratedMaterials(result.image, selectedMaterials);
+      if (shouldReviewMaterials) await verifyGeneratedMaterials(result.image, selectedMaterials, runtimeSettings.dollDesign);
       const { ext, bytes, mimeType } = result.image;
       resultUrl = await saveGeneratedAsset(versionId, ext, bytes, mimeType);
     } else {

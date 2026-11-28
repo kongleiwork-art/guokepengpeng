@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import path from 'node:path';
 import crypto from 'node:crypto';
 import { ApiError, GoogleGenAI, Modality } from '@google/genai';
 import {
@@ -13,6 +12,8 @@ import { FALLBACK_TEMPLATES, getAccessoryLabels } from '../data/seed.ts';
 import type { MaterialRecord } from '../db.ts';
 import { inspectImageBuffer } from '../utils/imageValidation.ts';
 import { writeMedia } from '../mediaStore.ts';
+import { materialConstructionHint } from '../data/materialPack.ts';
+import { resolveLocalAssetFile } from '../utils/assetFiles.ts';
 import { dollMaterialPart } from '../../src/lib/materialCategories.ts';
 import { formatMaterialAmount } from '../../src/lib/materialAmounts.ts';
 import { getMaterialAmounts } from '../data/materialAmounts.ts';
@@ -66,11 +67,12 @@ export function buildDollImagePrompt(input: ImageGenerateInput, materialImageLab
       'Create one small, visibly hand-assembled craft doll on a clean white studio background.',
       'The material list below is exhaustive. Use every selected material and add no other visible parts, props, paint, fabrics, or accessories. Leave out a feature if there is no selected material for it.',
       'Each input image is an approved material from the list. Preserve its shape, texture, and palette. Use one of the shown variants if a reference shows several.',
+      'Show the actual cut and assembled pieces as a straight-on craft photograph. A shell cap must keep its dry botanical surface. Individual cuts of cord must be countable. Use the exact chosen fabric swatch, including its plain or patterned finish.',
       'A limbless or faceless craft ornament is valid. Keep the shell body directly on the surface when no limb part is listed. Omit eyes, a mouth, limbs, footwear, straps, and hardware unless the materials and listed uses support them.',
       `The doll’s character is ${input.personaMbti} (${input.personaName}). Express this through arrangement and pose within the allowed parts.`,
       ...input.selectedMaterials.map((material, index) => {
         const amounts = (material.amounts ?? getMaterialAmounts(material.id)).map(formatMaterialAmount).join('。');
-        return `Input image ${index + 1}: ${material.label} (${material.material}). Part: ${dollMaterialPart(material, input.selectedMaterials)}. Details: ${material.visualHint}. Preparation for one doll: ${amounts}`;
+        return `Input image ${index + 1}: ${material.label} (${material.material}). Part: ${dollMaterialPart(material, input.selectedMaterials)}. Details: ${material.visualHint}. ${materialConstructionHint(material.id, input.dollDesign)} Preparation for one doll: ${amounts}`;
       }),
       input.dollDesign ? `Arrangement inspiration only, subject to the material list: ${input.dollDesign}` : '',
       'Keep the assembly feasible for hand craft. Show the whole doll and its material textures with gentle studio light. No text, graphic overlays, or watermark.',
@@ -110,22 +112,6 @@ export function buildDollImagePrompt(input: ImageGenerateInput, materialImageLab
     input.dollDesign ? `Prepared miniature doll design notes: ${input.dollDesign}` : '',
     'Art direction: visible delicate watercolor washes, fine colored-pencil stitch lines, tiny glossy dark bead eyes, gentle coral-peach rosy cheeks, soft grounded watercolor shadow beneath feet, pure crisp white background, single centered full-body doll, zero text, zero letters, zero watermark.',
   ].filter(Boolean).join('\n');
-}
-
-function resolveLocalAssetFile(urlPath: string): { absPath: string; mime: string } | null {
-  const clean = urlPath.replace(/^\/+/, '');
-  const candidates = [
-    path.resolve(process.cwd(), clean),
-    path.resolve(process.cwd(), 'public', clean),
-  ];
-  for (const absPath of candidates) {
-    if (fs.existsSync(absPath)) {
-      const ext = path.extname(absPath).toLowerCase();
-      const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
-      return { absPath, mime };
-    }
-  }
-  return null;
 }
 
 async function loadMaterialReferenceImages(input: ImageGenerateInput, legacyLimit = 6) {

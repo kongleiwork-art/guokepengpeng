@@ -88,3 +88,27 @@ export const MATERIAL_PACK = artwork.flatMap(([category, items]) =>
 }));
 
 export const MATERIAL_PACK_BY_ID = new Map(MATERIAL_PACK.map((item) => [item.id, item]));
+
+export const PALETTE_FABRICS: Record<string, { id: string; variant: string }> = {
+  green: { id: 'kit_green_gauze', variant: '浅苔绿' },
+  cream: { id: 'kit_cloud_cotton', variant: '奶油色' },
+  dark: { id: 'kit_fabric_pieces', variant: '深灰色' },
+  blue: { id: 'kit_fabric_pieces', variant: '藏蓝色' },
+  warm: { id: 'kit_fabric_pieces', variant: '酒红色' },
+  pastel: { id: 'kit_satin_gradient', variant: '柔和渐变色' },
+  patterned: { id: 'kit_fabric_scraps', variant: '细碎印花' },
+};
+
+const CONSTRUCTION_HINTS: Record<string, string> = {
+  kit_capped_acorn: '直接使用天然干橡果，保留果实尖端和连着果梗的木质壳斗。壳斗由细小干硬鳞片相叠，表面有植物纹理。',
+  kit_fabric_pieces: '取图册中一整块布样，素色布与印花布是不同的选择。整片沿用同一布样，保留可见裁边，作为一层围布。',
+  kit_hemp_twine: '两段独立麻绳各自固定在娃娃一侧，左右各露出一个自由剪口，可以从正面分别数出两段。',
+};
+
+export function materialConstructionHint(id: string, dollDesign?: string) {
+  const label = MATERIAL_PACK_BY_ID.get(id)?.label;
+  const swatch = Object.values(PALETTE_FABRICS).find(item =>
+    item.id === id && label && dollDesign?.includes(label + '选' + item.variant + '。'));
+  const color = swatch ? '采用图册中的' + (id === 'kit_fabric_pieces' ? '纯色' : '') + swatch.variant + '布样。' : '';
+  return (CONSTRUCTION_HINTS[id] ?? '') + color;
+}
