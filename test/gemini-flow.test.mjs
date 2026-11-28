@@ -269,6 +269,56 @@ test('预览支持单张照片分析和娃娃方案，同时保留生图限制',
   assert.equal(requests.length, 3);
 });
 
+test('工坊草稿由当前角色自由对话，沿用用料与最近的对话', { timeout: 20000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'nutshell-draft-chat-'));
+  const requests = [];
+  const reply = '跟熟人一起做手工，确实更容易打开话匣子。';
+  const provider = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks)));
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.end('data: ' + JSON.stringify({ choices: [{ delta: { content: reply } }] }) + '\n\ndata: [DONE]\n\n');
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  t.after(() => new Promise(resolve => provider.close(resolve)));
+  const { base } = await startApp(t, dir, {
+    CHAT_PROVIDER: 'cloud', STEPFUN_API_KEY: 'fixture',
+    STEPFUN_API_BASE: 'http://127.0.0.1:' + provider.address().port + '/v1',
+  });
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const ask = body => fetch(base + '/api/workshop/chat', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const first = { personaId: 'persona_isfp', materialIds: ['kit_hemp_twine'], text: '我和熟人在一起话很多。', history: [] };
+  const response = await ask(first);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /event-stream/);
+  const stream = await response.text();
+  assert.match(stream, /event: done/);
+  assert.ok(stream.includes(reply));
+  assert.equal(requests[0].stream, true);
+  assert.equal(requests[0].messages.length, 2);
+  assert.match(requests[0].messages[0].content, /观察者/);
+  assert.match(requests[0].messages[0].content, /麻绳/);
+  assert.equal(requests[0].messages[1].content, first.text);
+
+  const next = { ...first, text: '我们上次一起做了一个挂件。', history: [{ user: first.text, reply }] };
+  assert.match(await (await ask(next)).text(), /event: done/);
+  assert.deepEqual(requests[1].messages.slice(1), [
+    { role: 'user', content: first.text }, { role: 'assistant', content: reply }, { role: 'user', content: next.text },
+  ]);
+  for (const invalid of [
+    { personaId: 'missing' }, { text: ' ' }, { text: '字'.repeat(2001) },
+    { history: [{ role: 'system', content: 'invalid' }] }, { history: Array(7).fill(next.history[0]) },
+  ]) {
+    assert.equal((await ask({ ...first, ...invalid })).status, 400);
+  }
+  assert.equal(requests.length, 2);
+});
+
 test('照片识别超时或结果截断后重试，连续超时后结束', async (t) => {
   const { config } = await import('../server/config.ts');
   const { requestStepFunJson } = await import('../server/providers/stepfun.ts');

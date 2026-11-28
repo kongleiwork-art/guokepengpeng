@@ -141,6 +141,7 @@ data: {"code":"CHAT_TIMEOUT","message":"对话首字响应超过 10000ms 超时�
 - `POST /api/demo/nfc-tags/:alias/written` 接收 `{ url, scope }`。工坊核对标签读出的完整 URL 与当前环境的预期地址后登记时间。
 - 在 Vercel 配置 `IMAGE_GENERATION_ENABLED=true` 和云端生图密钥后开放生图和重生成。
 - `POST /api/mbti/recommend` 可接收一张照片。阶跃星辰识别画面风格，从 16 个虚构角色中给出创作建议。可选表单字段 `personaId` 会保留体验者选定的角色。后端按库存和照片配色返回娃娃角色、`photoStyle`、`dollDesign` 及含数量与尺寸的 `materialPlan`。首次识别超时后会用同一张照片自动重试一次，两次超时返回 `504 PROVIDER_TIMEOUT`。开启照片分析需配置 `STEPFUN_VISION_MODEL`，照片在应用后端内存中处理。关闭时，照片请求返回 `409 PHOTO_MBTI_UNAVAILABLE`。四题快测提交四项完整的 `quizAnswers`，按固定规则返回角色。
+- `POST /api/workshop/chat` 接收当前草稿的 `personaId`、`materialIds`、本条 `text` 和最近六轮 `history: [{ user, reply }]`，以 SSE 返回 `delta` 以及 `done` 或 `error`。对话保存在当前页面的娃娃草稿中。
 - `POST /api/mbti/guide/turn` 接收 `{ answers: [{ questionId, choice }] }`。以空数组取得首题，选项为 `a`、`lean-a`、`both`、`lean-b`、`b`。每题计一次，按四个维度完成 12 道情景题，倾向接近的维度各增加一道。完成后返回维度得分、角色候选和在库搭配。
 - Vercel 上使用中国站 Step Plan 时，API 从香港直连；连接或分析超时后可由同一部署的旧金山函数用原请求重试。转接请求使用 Vercel 同环境 OIDC 和 `SESSION_SECRET` 签名。
 - 重生成遇到上一次云端结果未确认时返回 `409 GENERATION_REVIEW_REQUIRED`。人工核对结果与费用后可发送 `reviewedUnknown: true`。

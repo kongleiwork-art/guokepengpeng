@@ -7,6 +7,7 @@ import type {
   DemoStatusPayload,
   DollDetail,
   DollSummary,
+  DraftChatInput,
   FallbackTemplate,
   ImageModelTier,
   ImageVendor,
@@ -483,10 +484,18 @@ export async function streamDollChat(
   callbacks: StreamChatCallbacks,
   signal?: AbortSignal
 ): Promise<void> {
+  return postChatStream('/api/dolls/' + encodeURIComponent(dollId) + '/chat', payload, callbacks, signal);
+}
+
+export function streamDraftChat(payload: DraftChatInput, callbacks: StreamChatCallbacks, signal?: AbortSignal) {
+  return postChatStream('/api/workshop/chat', payload, callbacks, signal);
+}
+
+async function postChatStream(url: string, payload: object, callbacks: StreamChatCallbacks, signal?: AbortSignal) {
   const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'text/event-stream' });
   const visitorKey = getOrCreateVisitorKey();
   if (visitorKey) headers.set('X-Visitor-Key', visitorKey);
-  const res = await fetch(`/api/dolls/${encodeURIComponent(dollId)}/chat`, {
+  const res = await fetch(url, {
     method: 'POST',
     credentials: 'include',
     headers,

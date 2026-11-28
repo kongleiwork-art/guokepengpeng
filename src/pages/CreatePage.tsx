@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  MessageCircle,
   Sparkles,
 } from 'lucide-react';
 import { api, ApiError, compressImageForUpload, generateIdempotencyKey } from '../lib/api';
@@ -20,6 +21,7 @@ import { WatercolorPersonaGridSkeleton } from '../components/WatercolorLoader';
 import { MbtiScenarioPanel, useScenarioQuiz } from '../components/MbtiScenarioPanel';
 import { PortraitCapture } from '../components/PortraitCapture';
 import { MaterialPlanList } from '../components/MaterialPlanList';
+import { DraftCompanionChat } from '../components/DraftCompanionChat';
 import { haptic } from '../lib/haptics';
 import { composePhotoMaterials, describeDollMaterials, recommendedMaterialIds, MATERIAL_CATEGORY_LABELS } from '../lib/materialCategories';
 
@@ -68,6 +70,7 @@ export function CreatePage() {
   const [photoMbtiEnabled, setPhotoMbtiEnabled] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState<MbtiQuizAnswers>({});
   const [personaToolsOpened, setPersonaToolsOpened] = useState(false);
+  const [companionOpen, setCompanionOpen] = useState(false);
 
   const quizArea = useRef<HTMLDivElement>(null);
   const [step, setStep] = useState<WizardStep>(1);
@@ -168,6 +171,7 @@ export function CreatePage() {
   const clearPhoto = () => {
     photoRevision.current += 1;
     lastPhotoResult.current = null;
+    setCompanionOpen(false);
     setPhotoFile(null);
     setPhotoError(null);
     setPhotoRecommendError(null);
@@ -185,6 +189,7 @@ export function CreatePage() {
   const applyPersonaSelection = (target: string, suggestedIds?: string[]) => {
     const role = personas.find(item => item.id === target || item.mbti === target.toUpperCase());
     if (!role) return;
+    setCompanionOpen(false);
     confirmedRole.current = role.id;
     roleRevision.current += 1;
     manualMaterials.current = false;
@@ -246,6 +251,7 @@ export function CreatePage() {
       }
       setPhotoFile(file);
       lastPhotoResult.current = null;
+      setCompanionOpen(false);
       setPhotoRecommendation(null);
       setPhotoRecommendError(null);
       idemKeyRef.current = generateIdempotencyKey('card');
@@ -416,6 +422,7 @@ export function CreatePage() {
   );
 
   const openSupportingQuiz = () => {
+    setCompanionOpen(false);
     setPersonaToolsOpened(true);
     setScenarioOpened(true);
     setPersonaMode('scenario');
@@ -434,6 +441,11 @@ export function CreatePage() {
   };
 
   const showWorkshopTools = !photoMbtiEnabled || personaToolsOpened || Boolean(presetPersonaId);
+  const companionDialog = photoRecommendation && activePersona && (
+    <DraftCompanionChat key={activePersona.id}
+      open={companionOpen} persona={activePersona} materialIds={selectedAccessories}
+      onClose={() => setCompanionOpen(false)} onRequestScenario={openSupportingQuiz} />
+  );
 
   const renderPreparedDoll = () => {
     if (!photoRecommendation || !activePersona) return null;
@@ -473,8 +485,10 @@ export function CreatePage() {
         </div>
         {usesSuggestedDesign && <p className="text-xs leading-relaxed text-[#6E5C50]">{photoRecommendation.reason}</p>}
         {selectedMaterials.length > 0 && <MaterialPlanList materials={selectedMaterials} />}
-        <button type="button" disabled={submitting || recommending} onClick={openSupportingQuiz}
-          className="btn-paper-soft min-h-10 px-3 text-sm text-[#3D7267]">感觉不像？做情景题</button>
+        <button type="button" aria-haspopup="dialog" disabled={submitting || recommending} onClick={() => setCompanionOpen(true)}
+          className="btn-paper-soft inline-flex min-h-11 items-center gap-2 px-3 text-sm text-[#3D7267]">
+          <MessageCircle className="h-4 w-4" aria-hidden="true" />让{activePersona.name}陪你继续聊
+        </button>
         <details className="space-y-2 border-t border-[#D8E6DF] pt-2">
           <summary className="cursor-pointer text-xs font-medium text-[#3D7267]">
             调整材料 · 已选 {selectedAccessories.length}/6
@@ -851,6 +865,7 @@ export function CreatePage() {
           </details>
         )}
         {!loadError && showWorkshopTools && <section className="studio-card rounded-[20px] p-5">{renderPersonaStep()}</section>}
+        {companionDialog}
       </div>
     );
   }
@@ -1014,6 +1029,7 @@ export function CreatePage() {
           </div>
         )}
       </form>
+      {companionDialog}
     </div>
   );
 }
