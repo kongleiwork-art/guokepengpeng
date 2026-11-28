@@ -91,6 +91,18 @@ export interface MbtiRecommendation {
   source: 'cloud_vision' | 'quiz_rule';
 }
 
+export interface DraftChatTurn {
+  user: string;
+  reply: string;
+}
+
+export interface DraftChatInput {
+  personaId: string;
+  materialIds: string[];
+  history: DraftChatTurn[];
+  text: string;
+}
+
 export type MbtiAxis = 'EI' | 'SN' | 'TF' | 'JP';
 export type MbtiScenarioChoice = 'a' | 'lean-a' | 'both' | 'lean-b' | 'b';
 

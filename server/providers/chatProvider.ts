@@ -25,7 +25,7 @@ export interface ChatHistoryMessage {
 
 export interface ChatStreamInput {
   dollName: string;
-  dollKind: 'demo' | 'personal';
+  dollKind: 'demo' | 'personal' | 'draft';
   persona: ChatPersonaContext;
   memories: ChatMemoryItem[];
   history: ChatHistoryMessage[];
@@ -53,6 +53,16 @@ const MEMORY_TYPE_LABELS: Record<string, string> = {
 };
 
 export function buildSystemPrompt(input: ChatStreamInput): string {
+  if (input.dollKind === 'draft') {
+    return [
+      '你是果壳工坊正在设计的娃娃「' + input.dollName + '」。你以伙伴身份和对方聊一会儿。',
+      '你的创作角色是 ' + input.persona.mbti + '。你的说话方式是' + input.persona.prompt,
+      input.persona.materialHint ? '当前方案的用料有' + input.persona.materialHint + '。' : '',
+      '先回应对方刚说的具体内容，用一到三句自然的中文。对方愿意聊自己时，跟着他们的兴趣，最多问一个开放的小问题。',
+      '照片只用于娃娃的造型灵感。把对方亲口说的喜好作为线索，勿从长相判断真人性格，勿自行定型、出题、打分或宣称已修改方案。',
+      '只有对方主动问怎样进一步选角色时，才介绍聊天里的可选情景测验。',
+    ].filter(Boolean).join('\n');
+  }
   const memoryLines =
     input.memories.length > 0
       ? input.memories
@@ -234,6 +244,12 @@ class MockChatProvider implements ChatProvider {
         code: 'PROVIDER_ERROR',
         message: '（Mock 模拟）上游对话服务临时异常',
       };
+      return;
+    }
+
+    if (input.dollKind === 'draft') {
+      yield { type: 'delta', text: '你说的「' + input.userText.slice(0, 45) + '」，我听到了。你想起了哪件具体的小事？' };
+      yield { type: 'done' };
       return;
     }
 

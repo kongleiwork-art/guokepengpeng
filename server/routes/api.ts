@@ -18,6 +18,7 @@ import {
 } from '../config.ts';
 import {
   FALLBACK_TEMPLATES,
+  PERSONA_SEEDS,
   type MaterialCategory,
 } from '../data/seed.ts';
 import { MATERIAL_CATEGORY_LABELS } from '../../src/lib/materialCategories.ts';
@@ -45,6 +46,7 @@ import {
   sendSuccess,
   setSessionCookie,
 } from '../middleware/session.ts';
+import type { DraftChatTurn } from '../../src/lib/types.ts';
 import { getChatProvider } from '../providers/chatProvider.ts';
 import { recommendMbti, type MbtiQuizAnswers } from '../providers/mbtiAnalyzer.ts';
 import { runMbtiGuideTurn } from '../providers/mbtiGuideEngine.ts';
@@ -675,6 +677,50 @@ function writeSseEvent(res: express.Response, event: string, data: unknown): voi
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
+
+router.post('/workshop/chat', ensureSession, async (req, res) => {
+  const persona = PERSONA_SEEDS.find(item => item.id === req.body?.personaId);
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  const materialIds = req.body?.materialIds ?? [];
+  const turns = req.body?.history ?? [];
+  const validMaterials = Array.isArray(materialIds) && materialIds.length <= 6 &&
+    materialIds.every(id => typeof id === 'string' && id.length <= 100);
+  const validHistory = Array.isArray(turns) && turns.length <= 6 && turns.every((turn): turn is DraftChatTurn =>
+    turn && typeof turn.user === 'string' && turn.user.length <= 2000 &&
+    typeof turn.reply === 'string' && turn.reply.length <= 4000);
+  if (!persona || !text || text.length > 2000 || !validMaterials || !validHistory) {
+    sendError(req, res, 400, 'INVALID_INPUT', '请从当前娃娃方案打开聊天，并输入 1–2000 字的消息。');
+    return;
+  }
+  const [settings, materialLabels] = await Promise.all([getRuntimeSettings(), resolveMaterialLabels(materialIds)]);
+  const history = turns.flatMap(turn => [
+    { role: 'user' as const, content: turn.user }, { role: 'assistant' as const, content: turn.reply },
+  ]);
+
+  const controller = new AbortController();
+  res.once('close', () => controller.abort());
+  if (res.destroyed) return;
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.flushHeaders();
+  try {
+    const provider = getChatProvider(settings.chatProviderMode);
+    for await (const event of provider.streamChat({
+      dollName: persona.name, dollKind: 'draft',
+      persona: { ...persona, materialHint: materialLabels.join('、') },
+      memories: [], history, userText: text, requestId: req.requestId, signal: controller.signal,
+    })) {
+      if (controller.signal.aborted) break;
+      if (event.type === 'delta') writeSseEvent(res, 'delta', { text: event.text });
+      else if (event.type === 'error') writeSseEvent(res, 'error', { code: event.code, message: event.message });
+      else writeSseEvent(res, 'done', { assistantMessageId: req.requestId, status: 'completed' });
+    }
+  } catch {
+    if (!controller.signal.aborted) writeSseEvent(res, 'error', { code: 'CHAT_INTERRUPTED', message: '回复中断了，可以重试这条消息。' });
+  } finally {
+    res.end();
+  }
+});
 
 router.post('/dolls/:id/chat', ensureSession, async (req, res) => {
   const dollId = req.params.id;
