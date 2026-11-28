@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import sharp from 'sharp';
+import { readMaterialArtwork } from '../server/utils/assetFiles.ts';
 import { SCENARIO_QUESTIONS, FOLLOW_UP_QUESTIONS } from '../server/data/mbtiQuestions.ts';
 import { runMbtiGuideTurn } from '../server/providers/mbtiGuideEngine.ts';
 import { PERSONA_SEEDS } from '../server/data/seed.ts';
@@ -86,4 +89,24 @@ test('抓拍质检分别识别曝光、虚焦、侧脸、倾斜、闭眼和多�
   assert.match(pose(0.4, 0.59), /正前方/);
   assert.match(pose(0.4, 0.5, 2), /一位/);
   assert.match(pose(0.4, 0.5, 1, true), /睁开/);
+});
+
+test('指定色样时发送材料包里的那一块布，保留原版多色图册供自由选材', async () => {
+  const file = fileURLToPath(new URL('../public/assets/materials/fabric_pieces.webp', import.meta.url));
+  const full = await readMaterialArtwork('kit_fabric_pieces', file);
+  assert.equal((await sharp(full).metadata()).width, 480);
+  for (const color of ['酒红色', '深灰色', '藏蓝色']) {
+    const crop = await readMaterialArtwork('kit_fabric_pieces', file, '大块布头选' + color + '。');
+    const info = await sharp(crop).metadata();
+    assert.ok(info.width < 240 && info.height < 150);
+    assert.equal(info.format, 'webp');
+    const pixels = await sharp(crop).removeAlpha().raw().toBuffer();
+    for (let y = 0; y < info.height; y++) {
+      for (let x = 0; x < info.width; x++) {
+        if (x !== 0 && x !== info.width - 1 && y !== 0 && y !== info.height - 1) continue;
+        const offset = (y * info.width + x) * 3;
+        assert.ok(Math.min(...pixels.subarray(offset, offset + 3)) > 205, color + '裁边应完整且不混入相邻布样');
+      }
+    }
+  }
 });

@@ -1,6 +1,6 @@
 import { dollMaterialPart } from '../../src/lib/materialCategories.ts';
 import { MATERIAL_PACK_BY_ID, materialConstructionHint } from '../data/materialPack.ts';
-import { resolveLocalAssetFile } from '../utils/assetFiles.ts';
+import { readMaterialArtwork, resolveLocalAssetFile } from '../utils/assetFiles.ts';
 import { config } from '../config.ts';
 import { getMaterialAmounts } from '../data/materialAmounts.ts';
 import type { MaterialRecord } from '../db.ts';
@@ -34,7 +34,8 @@ export async function verifyGeneratedMaterials(
       const url = MATERIAL_PACK_BY_ID.get(item.id)?.referenceImageUrl;
       const file = url && resolveLocalAssetFile(url);
       if (!file) throw materialReviewUnavailable();
-      const input = await sharp(file.absPath).resize(tile, tile, { fit: 'contain', background: '#ffffff' }).png().toBuffer();
+      const artwork = await readMaterialArtwork(item.id, file.absPath, dollDesign);
+      const input = await sharp(artwork).resize(tile, tile, { fit: 'contain', background: '#ffffff' }).png().toBuffer();
       return { input, left: index % columns * tile, top: Math.floor(index / columns) * tile };
     }));
     const reference = await sharp({ create: { width: columns * tile, height: Math.ceil(materials.length / columns) * tile,
@@ -51,7 +52,8 @@ export async function verifyGeneratedMaterials(
         { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${reference.toString('base64')}`, detail: 'low' } },
       ],
       config.stepfunVisionModel,
-      { maxTokens: 1700, attemptTimeoutsMs: [22_000, 35_000] },
+      // Comparing the swatches and the finished piece also uses reasoning tokens before the short verdict.
+      { maxTokens: 3000, attemptTimeoutsMs: [28_000, 39_000] },
     );
   } catch (error: unknown) {
     console.warn('[image] material review failed', (error as { code?: string })?.code);
